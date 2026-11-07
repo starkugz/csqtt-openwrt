@@ -46,6 +46,30 @@
 #    CSQTT_VERSION=v1.0 sh install-csqtt.sh            # конкретный выпуск
 #    CSQTT_LOCAL_DIR=/path sh install-csqtt.sh            # из локального набора
 #    CSQTT_CORE_ONLY=1 sh install-csqtt.sh                # только ядро (панель сохранить)
+#    CSQTT_CORES=2.1.9 sh install-csqtt.sh                # из набора трёх файлов: одно ядро
+#    CSQTT_CORES=both sh install-csqtt.sh                 # оба ядра csqtt-core-*
+#
+#  [ТРИ ФАЙЛА] Наряду с внешними именами выпуска установщик понимает
+#  публикацию с ВНУТРЕННИМИ именами пакетов (ровно три файла на платформу):
+#    csqtt-core-2.1.9_<pkgver>_<arch>.<ext>   # ядро 2.1.9
+#    csqtt-core-2.5.0_<pkgver>_<arch>.<ext>   # ядро 2.5.0
+#    luci-app-csqtt_<pkgver>_all.<ext>        # панель LuCI (необязательна)
+#  Ядра независимы (любое/оба), панель необязательна; какие ядра ставить —
+#  задаёт CSQTT_CORES (2.1.9 | 2.5.0 | both, по умолчанию both). Имена берутся
+#  из SHA256SUMS выпуска, версии — из MANIFEST.txt (core219_version/
+#  core250_version/luci_version).
+#
+#  [ПУБЛИЧНЫЕ ИМЕНА, выпуск 2.0] Та же схема «независимые ядра + панель», но
+#  с публичными именами файлов выпуска (версия ядра 2.5 показана как 2.5.1,
+#  внутренний пакет остаётся csqtt-core-2.5.0):
+#    csqtt-core-2.1.9-openwrt-<серия>-<arch>.<ext>   # ядро 2.1.9
+#    csqtt-core-2.5.1-openwrt-<серия>-<arch>.<ext>   # ядро 2.5.1 (пакет 2.5.0)
+#    luci-app-csqtt-2.0-openwrt-<серия>.<ext>        # панель LuCI (архитектура all)
+#  <серия> — 24.10 | 25.12 | snapshot; <arch> — как в ARCH_OK_LIST; <ext> — ipk|apk.
+#  Состав (какие ядра) задаёт CSQTT_CORES; имена берутся из SHA256SUMS выпуска,
+#  версии — из MANIFEST.txt (core219_version/core250_version/luci_version).
+#  Внутренние имена пакетов и ключи core_version остаются прежними (2.5.0):
+#  публичное «2.5.1» — это ярлык файла, а не переименование пакета.
 #    wget --no-proxy -qO- https://github.com/starkugz/csqtt-openwrt/raw/refs/heads/main/install-csqtt.sh | ash
 #
 #  Принципы:
@@ -72,6 +96,11 @@
 #     УСПЕХОМ, то есть молча ничего не меняет — поэтому при понижении к opkg
 #     добавляется --force-downgrade. apk с явно указанным файлом понижает сам
 #     (проверено на apk-tools 3.0.5), флаг ему не нужен;
+#   - если версия пакета СОВПАДАЕТ с установленной (замена содержимого пакетов
+#     того же выпуска без смены номера), opkg без флага печатает «… installed in
+#     root is up to date» и завершается УСПЕХОМ, НЕ заменяя файлы, поэтому к
+#     opkg добавляется --force-reinstall. apk сравнивает содержимое пакета и
+#     заменяет сам; одни и те же флаги применяются в сухом прогоне и установке;
 #   - установщик НЕ удаляет пакеты при ошибке установки; если после установки
 #     версия не изменилась (менеджер молча пропустил замену), сообщается об
 #     ошибке, а не об успехе; удаление старой версии остаётся резервным путём и
@@ -79,6 +108,7 @@
 #   - конфигурация не заменяется на шаблон без резервной копии с правами 600.
 # ================================================================
 set -eu
+die() { printf '[x] %s\n' "$*" >&2; exit 1; }
 
 REPO="starkugz/csqtt-openwrt"
 # Поддерживаемые архитектуры пакетов (каталоги сборки OpenWrt).
@@ -89,12 +119,19 @@ APK_TOOLS_MIN=3
 REQUIRED_DEPS="kmod-tun luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout"
 NEED_KB_TMP=30000
 NEED_KB_ROOT=10000
-# Понижение версий пакетов: opkg без флага молча пропускает установку более
-# старого пакета (печатает «Not downgrading …» и возвращает УСПЕХ), поэтому при
-# понижении к opkg добавляется --force-downgrade. apk с явно указанным файлом
-# понижает сам (проверено на apk-tools 3.0.5: «Downgrading …»), флаг не нужен.
-# Значение задаётся ниже — после сравнения версий выпуска и установленных.
-PM_FORCE_DOWNGRADE=""
+# Флаги принудительной операции для менеджера пакетов (opkg). Заполняются ниже —
+# после сравнения версий выпуска и установленных:
+#   - понижение версии: opkg без флага молча пропускает более старый пакет
+#     (печатает «Not downgrading …» и возвращает УСПЕХ) — добавляется
+#     --force-downgrade;
+#   - совпадающая версия (замена содержимого пакетов того же выпуска): opkg без
+#     флага печатает «… installed in root is up to date» и возвращает УСПЕХ, не
+#     заменяя файлы — добавляется --force-reinstall.
+# apk с явно указанным файлом и понижает, и заменяет содержимое сам (проверено
+# на apk-tools 3.0.5: «Downgrading …» / «Replacing …»), флаг ему не нужен.
+# Случаи взаимоисключающие — в переменной лежит один флаг. Одни и те же флаги
+# применяются и в сухом прогоне, и в реальной установке.
+PM_FORCE=""
 
 DRY_RUN=0
 ASSUME_YES=0
@@ -105,14 +142,30 @@ CORE_ONLY="${CSQTT_CORE_ONLY:-0}"
 # [CORE-ONLY] Разрешить несовпадающие версии ядра и панели (отключает проверку;
 # только осознанно).
 ALLOW_MIXED="${CSQTT_ALLOW_MIXED:-0}"
-for arg in "$@"; do
+# [ТРИ ФАЙЛА] Какие ядра набора из трёх файлов ставить: 2.1.9 | 2.5.0 | both.
+# Действует только для набора с внутренними именами пакетов (csqtt-core-*);
+# для прежних форматов состав выпуска не меняется.
+CORES="${CSQTT_CORES:-both}"
+INSTALL_SET="${CSQTT_INSTALL_SET:-}"
+PANEL_ONLY=0
+MENU_FORCE=0
+MENU_INPUT=""
+CLI_CORE_ONLY=0
+while [ "$#" -gt 0 ]; do
+	arg=$1
 	case "$arg" in
 		--dry-run) DRY_RUN=1 ;;
 		--yes|-y) ASSUME_YES=1 ;;
-		--core-only) CORE_ONLY=1 ;;
+		--core-only) CORE_ONLY=1; CLI_CORE_ONLY=1 ;;
+		--menu) MENU_FORCE=1 ;;
+		--set) [ "$#" -ge 2 ] || die "для --set нужен состав установки"; INSTALL_SET=$2; shift ;;
+		--set=*) INSTALL_SET=${arg#--set=} ;;
 		--help|-h)
 			cat <<'HELP'
-Использование: sh install-csqtt.sh [--yes] [--dry-run] [--core-only]
+Использование: sh install-csqtt.sh [--menu] [--set НАБОР] [--yes] [--dry-run] [--core-only]
+  --menu       показать меню выбора (в том числе при --yes)
+  --set        panel | panel-2.1.9 | panel-2.5.1 | core-2.1.9 | core-2.5.1 | cores | full
+               panel — только LuCI; cores — оба ядра; full — оба ядра и LuCI
   --yes        не запрашивать подтверждение плана установки
   --dry-run    показать план и выполнить все проверки, ничего не устанавливая
   --core-only  обновить только ядро, сохранив панель LuCI и её встроенный перевод
@@ -123,17 +176,77 @@ for arg in "$@"; do
   CSQTT_ROLLBACK_DIR  каталог пакетов предыдущей версии (переход вниз)
   CSQTT_CORE_ONLY=1   то же, что --core-only (только ядро)
   CSQTT_ALLOW_MIXED=1 разрешить несовпадающие версии ядра и панели
+  CSQTT_CORES     для набора из трёх файлов: 2.1.9 | 2.5.0 | both (по умолчанию both)
+  CSQTT_INSTALL_SET  состав, как --set (имеет приоритет над прежними переменными)
+  CSQTT_NONINTERACTIVE=1  отключить автоматическое меню
 HELP
 			exit 0 ;;
 		*) die "неизвестный аргумент: $arg (см. --help)" ;;
 	esac
+	shift
 done
+case "$CORES" in
+	2.5.1) CORES=2.5.0 ;;
+	2.1.9|2.5.0|both) : ;;
+	*) die "CSQTT_CORES: ожидается 2.1.9, 2.5.0 или both (получено: $CORES)." ;;
+esac
+
+select_install_set() {
+	if [ "$MENU_FORCE" = 1 ] || { [ -t 0 ] && [ -z "$INSTALL_SET" ] && [ "$ASSUME_YES" != 1 ] && [ "${CSQTT_NONINTERACTIVE:-0}" != 1 ] && [ -z "${CSQTT_CORES:-}" ] && [ "$CORE_ONLY" != 1 ]; }; then
+		if (: </dev/tty) 2>/dev/null; then MENU_INPUT=/dev/tty
+		elif [ "$MENU_FORCE" = 1 ]; then die "нет интерактивного терминала: используйте --set НАБОР"
+		fi
+		if [ -n "$MENU_INPUT" ]; then
+			while :; do
+				cat >&2 <<'MENU'
+
+Что установить на роутер?
+  1. Только панель LuCI 2.0
+  2. Панель и ядро 2.1.9
+  3. Панель и ядро 2.5.1
+  4. Только ядро 2.1.9
+  5. Только ядро 2.5.1
+  6. Оба ядра без панели
+  7. Оба ядра и панель
+  0. Отмена
+MENU
+				printf 'Выберите [0–7]: ' >&2
+				read -r choice < "$MENU_INPUT" || die "выбор отменён"
+				case "$choice" in
+					1) INSTALL_SET=panel ;; 2) INSTALL_SET=panel-2.1.9 ;;
+					3) INSTALL_SET=panel-2.5.1 ;; 4) INSTALL_SET=core-2.1.9 ;;
+					5) INSTALL_SET=core-2.5.1 ;; 6) INSTALL_SET=cores ;; 7) INSTALL_SET=full ;;
+					0) info "установка отменена"; exit 0 ;; *) warn "введите число от 0 до 7"; continue ;;
+				esac
+				break
+			done
+		fi
+	fi
+	if [ -n "$INSTALL_SET" ]; then
+		[ "$CLI_CORE_ONLY" != 1 ] || die "--set и --core-only нельзя указывать вместе"
+		case "$INSTALL_SET" in
+			panel) PANEL_ONLY=1; CORES=none; CORE_ONLY=0 ;;
+			panel-2.1.9) CORES=2.1.9; CORE_ONLY=0 ;;
+			panel-2.5.1|panel-2.5.0) CORES=2.5.0; CORE_ONLY=0 ;;
+			core-2.1.9) CORES=2.1.9; CORE_ONLY=1 ;;
+			core-2.5.1|core-2.5.0) CORES=2.5.0; CORE_ONLY=1 ;;
+			cores) CORES=both; CORE_ONLY=1 ;;
+			full) CORES=both; CORE_ONLY=0 ;;
+			*) die "неизвестный состав установки: $INSTALL_SET" ;;
+		esac
+	fi
+	if [ "$PANEL_ONLY" = 1 ]; then
+		REQUIRED_DEPS="luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout"
+		NEED_KB_TMP=3000; NEED_KB_ROOT=1000
+	elif [ "$CORE_ONLY" = 1 ]; then REQUIRED_DEPS="kmod-tun"
+	fi
+}
 
 # --- абстракция менеджера пакетов ---------------------------------------------
 # PM=apk|opkg определяется в check_platform() по релизу прошивки; где команда
 # менеджера требует формата именно своего менеджера (apk --simulate /
 # opkg --noaction), ветвление делается явно. Общие операции — через pm_*.
-pm_update()      { "$PM" update "$@"; }
+pm_update()      { "$PM" update; }
 
 # --- переопределяемые пути (для локальных тестов; на роутере пусто) ----------
 ROOT="${CSQTT_ROOT:-}"
@@ -156,7 +269,6 @@ BACKUP=""
 log()  { printf '[+] %s\n' "$*"; }
 info() { printf '[i] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
-die()  { printf '[x] %s\n' "$*" >&2; exit 1; }
 
 download() {
 	# download <url> <out>  (не исполняет загруженные данные)
@@ -212,7 +324,7 @@ installed_version_of() {
 		opkg list-installed 2>/dev/null | sed -n "s/^${_pkg} - \([0-9][^ ]*\).*/\1/p" | head -n1
 	fi
 }
-installed_version() { installed_version_of csqtt; }
+installed_version() { installed_version_of "${PRIMARY_PKG:-csqtt}"; }
 
 version_gt() {
 	# 0, если $1 > $2 (сначала apk version -t, иначе числовой fallback)
@@ -388,6 +500,14 @@ direct_ui_tags() {
 		printf '%s\n' openwrt-25.12 ow25
 	fi
 }
+# Публичный ярлык версии ядра для имени файла: внутренний пакет 2.5.0 в выпуске
+# 2.0 показывается как «2.5.1». Остальные версии совпадают с внутренними.
+core_public_name() {
+	case "$1" in
+		2.5.0) printf '%s' 2.5.1 ;;
+		*)     printf '%s' "$1" ;;
+	esac
+}
 # Первое совпадение по тегам (новый формат, затем прежний) — из манифеста.
 pick_direct_core() {
 	for t in $(direct_core_tags); do
@@ -409,6 +529,82 @@ pick_direct_i18n() {
 		if [ -n "$r" ]; then printf '%s' "$r"; return 0; fi
 	done
 	return 0
+}
+
+# --- [ТРИ ФАЙЛА] набор с ВНУТРЕННИМИ именами пакетов ---------------
+# Ровно три файла на платформу, имена — внутренние (как в пакетах):
+#   csqtt-core-2.1.9_<pkgver>_<arch>.<ext>
+#   csqtt-core-2.5.0_<pkgver>_<arch>.<ext>
+#   luci-app-csqtt_<pkgver>_all.<ext>        (необязательна)
+# Имена берутся ИЗ МАНИФЕСТА (как и для прямых внешних имён), а не
+# конструируются. Отличие от внешнего прямого набора — имена и состав ядер
+# (одно/оба), задаваемый CSQTT_CORES.
+manifest_is_three_file() {
+	# Имя пакета набора: csqtt-core-2.1.9_<pkgver>_<arch>.<apk|ipk>.
+	# Требуем окончание .apk/.ipk, чтобы НЕ путать с внешним архивом
+	# (csqtt-core-2.1.9_pkg-…_openwrt-…_<arch>-apk.tar.gz) и с прежними
+	# прямыми именами (csqtt-<ver>-openwrt-…).
+	grep -qE '(^|[[:space:]])\.?/?csqtt-core-2\.[0-9]+(\.[0-9]+)?_[0-9][^_/[:space:]]*_[A-Za-z0-9_.-]+\.(apk|ipk)([[:space:]]|$)' "$1" 2>/dev/null
+}
+
+# Набор с ПУБЛИЧНЫМИ именами файлов (выпуск 2.0):
+#   csqtt-core-<core>-openwrt-<серия>-<arch>.<ext> (ядро 2.1.9 и/или 2.5.1).
+# Отличается от внутреннего набора (подчёркивания) и от внешнего архива
+# (там перед openwrt стоит подчёркивание) наличием `-openwrt-` без подчёркиваний.
+manifest_is_public_set() {
+	grep -qE '(^|[[:space:]])\.?/?csqtt-core-[0-9][^ _/[:space:]]*-openwrt-[^ /[:space:]]*[.]'"${PKG_EXT}"'([[:space:]]|$)' "$1" 2>/dev/null
+}
+
+# Выбор ядра <core> (внутренний: 2.1.9 | 2.5.0) из манифеста: возвращает "hash name".
+# Понимает обе формы имени:
+#   внутреннюю: csqtt-core-2.1.9_<pkgver>_<arch>.<ext>
+#   публичную:  csqtt-core-<public>-openwrt-<серия>-<arch>.<ext>  (2.5.0 -> 2.5.1)
+pick_tf_core() {
+	# внутреннее имя
+	r=$(pick_asset "$1" "^csqtt-core-${2}_[0-9][^_]*_${ARCH}[.]${PKG_EXT}\$")
+	if [ -n "$r" ]; then printf '%s' "$r"; return 0; fi
+	# публичное имя (ядро 2.5.1 опубликовано и как 2.5.0 — тоже принимается)
+	for t in $(direct_core_tags); do
+		r=$(pick_asset "$1" "^csqtt-core-$(core_public_name "$2")-${t}-${ARCH}[.]${PKG_EXT}\$")
+		if [ -n "$r" ]; then printf '%s' "$r"; return 0; fi
+		if [ "$2" = 2.5.0 ]; then
+			r=$(pick_asset "$1" "^csqtt-core-2[.]5[.]0-${t}-${ARCH}[.]${PKG_EXT}\$")
+			if [ -n "$r" ]; then printf '%s' "$r"; return 0; fi
+		fi
+	done
+	return 0
+}
+
+# Выбор панели LuCI из манифеста: возвращает "hash name".
+# Понимает обе формы:
+#   внутреннюю: luci-app-csqtt_<pkgver>_all.<ext>
+#   публичную:  luci-app-csqtt-<pkgver>-openwrt-<серия>.<ext>
+pick_tf_panel() {
+	r=$(pick_asset "$1" "^luci-app-csqtt_[0-9][^_]*_all[.]${PKG_EXT}\$")
+	if [ -n "$r" ]; then printf '%s' "$r"; return 0; fi
+	for t in $(direct_ui_tags); do
+		r=$(pick_asset "$1" "^luci-app-csqtt-[0-9][^-]*-${t}[.]${PKG_EXT}\$")
+		if [ -n "$r" ]; then printf '%s' "$r"; return 0; fi
+	done
+	return 0
+}
+
+# Выбранные ядра для схемы «три файла» (по одной версии в строке).
+tf_core_versions() {
+	case "$CORES" in
+		none) : ;;
+		2.1.9) printf '%s\n' 2.1.9 ;;
+		2.5.0) printf '%s\n' 2.5.0 ;;
+		*)     printf '%s\n' 2.1.9 2.5.0 ;;
+	esac
+}
+
+# Заполняет TF_C_NAME/TF_C_SHA ядром <core> из манифеста $TF_MANIFEST.
+set_tf_core() {
+	_c=$(pick_tf_core "$TF_MANIFEST" "$1")
+	[ -n "$_c" ] || die "в наборе нет ядра csqtt-core-$1 (публичное имя csqtt-core-$(core_public_name "$1")-openwrt-…) для ${ARCH}/.${PKG_EXT} (выпуск $TAG)."
+	TF_C_NAME=${_c#* }
+	TF_C_SHA=${_c%% *}
 }
 
 # --- legacy: выбор отдельных пакетов из плоского манифеста (старые выпуски) --
@@ -471,12 +667,12 @@ verify_package_set() {
 		# opkg проверяет arch и зависимости (kmod-tun для running kernel)
 		# так же, как и реальная установка.
 		# shellcheck disable=SC2046,SC2086  # имена файлов без пробелов; флаг опционален
-		if opkg install $PM_FORCE_DOWNGRADE --noaction $(target_files) >/dev/null 2>&1; then
+		if opkg install $PM_FORCE --noaction $(target_files) >/dev/null 2>&1; then
 			info "набор совместим: arch, зависимости и kmod-tun разрешаются."
 			return 0
 		fi
 		# shellcheck disable=SC2046,SC2086  # имена файлов без пробелов; флаг опционален
-		plan=$(opkg install $PM_FORCE_DOWNGRADE --noaction $(target_files) 2>&1 || true)
+		plan=$(opkg install $PM_FORCE --noaction $(target_files) 2>&1 || true)
 	fi
 	if ! pm_dry_run kmod-tun >/dev/null 2>&1; then
 		die "набор несовместим: kmod-tun не разрешается для ядра $(uname -r). На SNAPSHOT модуль должен соответствовать ядру и цели; обновите индексы ($PM update) или прошивку. $PM: $(printf '%s' "$plan" | tail -n1)"
@@ -490,12 +686,11 @@ verify_package_set() {
 # присутствует в манифесте прежнего выпуска (legacy). CORE_ONLY=1 — только ядро
 # (панель LuCI, встроенный словарь и, если стоял, отдельный перевод сохраняются).
 target_files() {
-	if [ "${CORE_ONLY:-0}" = 1 ]; then
-		printf '%s\n' "$SETDIR/$CORE_NAME"
-	elif [ -n "${I18N_NAME:-}" ]; then
-		printf '%s %s %s\n' "$SETDIR/$CORE_NAME" "$SETDIR/$PANEL_NAME" "$SETDIR/$I18N_NAME"
-	else
-		printf '%s %s\n' "$SETDIR/$CORE_NAME" "$SETDIR/$PANEL_NAME"
+	# CORE_FILES — одно ядро (прежние форматы) или несколько (набор «три файла»).
+	for f in $CORE_FILES; do printf '%s/%s ' "$SETDIR" "$f"; done
+	if [ "${CORE_ONLY:-0}" != 1 ]; then
+		if [ -n "${PANEL_NAME:-}" ]; then printf '%s/%s ' "$SETDIR" "$PANEL_NAME"; fi
+		if [ -n "${I18N_NAME:-}" ]; then printf '%s/%s ' "$SETDIR" "$I18N_NAME"; fi
 	fi
 }
 
@@ -505,7 +700,7 @@ install_packages() {
 		# apk с явным файлом понижает сам, отдельного флага нет.
 		apk add --allow-untrusted $(target_files)
 	else
-		opkg install $PM_FORCE_DOWNGRADE $(target_files)
+		opkg install $PM_FORCE $(target_files)
 	fi
 }
 
@@ -515,11 +710,27 @@ find_rollback() {
 	dir="$ROLLBACK_DIR"
 	[ -n "$dir" ] || dir="$TMPBASE/csqtt-rollback"
 	[ -d "$dir" ] || return 1
-	# Ядро и панель обязательны; отдельный перевод (legacy) — если он был.
-	for f in csqtt luci-app-csqtt; do
-		found=$(find "$dir" -maxdepth 1 -name "${f}_*.${PKG_EXT}" 2>/dev/null | head -n1)
-		[ -n "$found" ] || return 1
-	done
+	if [ "${SET_KIND:-}" = "three-file" ]; then
+		# Восстановить нужно каждое выбранное ядро и (если ставили) панель.
+		# Ищем и внутреннее (csqtt-core-<core>_…), и публичное
+		# (csqtt-core-<public>-openwrt-…) имя.
+		for cv in $(tf_core_versions); do
+			found=$(find "$dir" -maxdepth 1 -name "csqtt-core-${cv}_*.${PKG_EXT}" 2>/dev/null | head -n1)
+			[ -n "$found" ] || found=$(find "$dir" -maxdepth 1 -name "csqtt-core-$(core_public_name "$cv")-openwrt-*.${PKG_EXT}" 2>/dev/null | head -n1)
+			[ -n "$found" ] || return 1
+		done
+		if [ "${CORE_ONLY:-0}" != 1 ]; then
+			found=$(find "$dir" -maxdepth 1 -name "luci-app-csqtt_*.${PKG_EXT}" 2>/dev/null | head -n1)
+			[ -n "$found" ] || found=$(find "$dir" -maxdepth 1 -name "luci-app-csqtt-*-openwrt-*.${PKG_EXT}" 2>/dev/null | head -n1)
+			[ -n "$found" ] || return 1
+		fi
+	else
+		# Прежние форматы: ядро и панель обязательны.
+		for f in csqtt luci-app-csqtt; do
+			found=$(find "$dir" -maxdepth 1 -name "${f}_*.${PKG_EXT}" 2>/dev/null | head -n1)
+			[ -n "$found" ] || return 1
+		done
+	fi
 	printf '%s' "$dir"
 }
 
@@ -541,6 +752,28 @@ restore_rollback() {
 
 # --- план и подтверждение ---------------------------------------------------
 show_plan() {
+	if [ "$SET_KIND" = "three-file" ]; then
+		if [ "$PANEL_ONLY" = 1 ]; then PLAN_PKG_LINES="      только панель LuCI:"
+		else PLAN_PKG_LINES="      ядра CSQTT (имена из манифеста):"; fi
+		for f in $CORE_FILES; do
+			PLAN_PKG_LINES="$PLAN_PKG_LINES
+        $f"
+		done
+		if [ -n "$PANEL_NAME" ]; then
+			PLAN_PKG_LINES="$PLAN_PKG_LINES
+        $PANEL_NAME   — панель LuCI ${PANEL_VER:-?} (русский интерфейс встроен)"
+		else
+			PLAN_PKG_LINES="$PLAN_PKG_LINES
+        (панель LuCI не ставится в режиме «только ядро»)"
+		fi
+	else
+		PLAN_PKG_LINES="      $CORE_NAME   — ядро CSQTT ${CORE_VER:-?}, пакет ${PKG_VER:-?}
+      $PANEL_NAME  — панель LuCI ${PANEL_VER:-?} (русский интерфейс встроен)"
+		if [ -n "${I18N_NAME:-}" ]; then
+			PLAN_PKG_LINES="$PLAN_PKG_LINES
+      $I18N_NAME   — отдельный перевод ${I18N_VER:-?} (legacy, не требуется)"
+		fi
+	fi
 	cat <<EOF
 
 [+] ПЛАН:
@@ -549,11 +782,9 @@ show_plan() {
     Архитектура: ${ARCH:-?}${OW_TARGET:+, target $OW_TARGET}
     Менеджер:    $PM, формат .$PKG_EXT (семейство $FAMILY)
     Источник:    $SRC_DESC
-    Режим:       ${MODE_DESC:-полный набор (ядро + панель)}${DOWNGRADE_LINE}
+    Режим:       ${MODE_DESC:-полный набор (ядро + панель)}${MODE_WARN_LINE}
     Пакеты (имена из манифеста):
-      $CORE_NAME   — ядро CSQTT ${CORE_VER:-?}, пакет ${PKG_VER:-?}
-      $PANEL_NAME  — панель LuCI ${PANEL_VER:-?} (русский интерфейс встроен)
-      ${I18N_NAME:+$I18N_NAME   — отдельный перевод ${I18N_VER:-?} (legacy, не требуется)}
+$PLAN_PKG_LINES
     Зависимости из репозиториев OpenWrt:$REQUIRED_DEPS
     НЕ выполняется: массовое обновление (upgrade), перезагрузка, изменение
     маршрутов/WAN/DNS/firewall/NAT. Туннель поднимается только на интерфейсе
@@ -563,9 +794,10 @@ EOF
 		echo "[i] dry-run: план и проверки выполнены, изменения не производились."
 		exit 0
 	fi
-	if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+	if [ "$ASSUME_YES" != 1 ] && { [ -n "$MENU_INPUT" ] || [ -t 0 ]; }; then
 		printf '[?] Продолжить установку? [Y/n] '
-		read -r ans || ans="y"
+		if [ -n "$MENU_INPUT" ]; then read -r ans < "$MENU_INPUT" || die "установка отменена"
+		else read -r ans || die "установка отменена"; fi
 		case "$ans" in
 			y|Y|yes|YES|"") : ;;
 			*) die "установка отменена пользователем." ;;
@@ -576,6 +808,7 @@ EOF
 # --- 1. окружение -----------------------------------------------------------
 [ "$(id -u)" = 0 ] || die "нужны права root."
 check_platform   # определяет PM/PKG_EXT/FAMILY/OW_SERIES и требует нужный менеджер
+select_install_set
 # Блокировка параллельной установки (атомарный mkdir; не требует flock).
 if ! mkdir "$LOCK" 2>/dev/null; then
 	die "уже выполняется установка ($LOCK). Дождитесь завершения и повторите."
@@ -613,6 +846,7 @@ MANIFEST="$WORK/SHA256SUMS"
 MANIFEST_INTERIM="$WORK/SHA256SUMS.direct"
 DIRECT_FILE=""
 SET_KIND=""
+TF_FORM=""
 ARCHIVE=""
 ARCH_NAME=""
 SRC_DESC=""
@@ -620,6 +854,9 @@ PKG_VER=""
 CORE_VER=""
 PANEL_VER=""
 I18N_VER=""
+I18N_NAME=""
+CORE219_VER=""
+CORE250_VER=""
 
 # Есть ли в манифесте строки прямых пакетов (csqtt-<ver>-<тег>-…).
 manifest_is_direct() {
@@ -628,7 +865,13 @@ manifest_is_direct() {
 
 # 3a. Прямые пакеты по единому манифесту SHA256SUMS.
 if fetch "$BASE/SHA256SUMS" "$MANIFEST" 2>/dev/null && [ -s "$MANIFEST" ]; then
-	if manifest_is_direct "$MANIFEST"; then
+	if manifest_is_three_file "$MANIFEST"; then
+		# Набор из трёх файлов с ВНУТРЕННИМИ именами пакетов (csqtt-core-*).
+		SET_KIND="three-file"; TF_FORM="internal"
+	elif manifest_is_public_set "$MANIFEST"; then
+		# Набор независимых ядер с ПУБЛИЧНЫМИ именами файлов (2.1.9 / 2.5.1).
+		SET_KIND="three-file"; TF_FORM="public"
+	elif manifest_is_direct "$MANIFEST"; then
 		CORE=$(pick_direct_core "$MANIFEST")
 		PANEL=$(pick_direct_panel "$MANIFEST")
 		I18N=$(pick_direct_i18n "$MANIFEST")
@@ -642,7 +885,7 @@ if fetch "$BASE/SHA256SUMS" "$MANIFEST" 2>/dev/null && [ -s "$MANIFEST" ]; then
 fi
 
 # 3a'. Промежуточный прямой манифест SHA256SUMS.direct (прежние выпуски).
-if [ "$SET_KIND" != direct ] \
+if [ -z "$SET_KIND" ] \
 	&& fetch "$BASE/SHA256SUMS.direct" "$MANIFEST_INTERIM" 2>/dev/null && [ -s "$MANIFEST_INTERIM" ]; then
 	CORE=$(pick_direct_core "$MANIFEST_INTERIM")
 	PANEL=$(pick_direct_panel "$MANIFEST_INTERIM")
@@ -653,7 +896,107 @@ if [ "$SET_KIND" != direct ] \
 	fi
 fi
 
-if [ "$SET_KIND" = "direct" ]; then
+if [ -n "$INSTALL_SET" ] && [ "$SET_KIND" != "three-file" ]; then
+	die "выбор состава требует выпуска с самостоятельными пакетами ядер и панели"
+fi
+if [ "$SET_KIND" = "three-file" ]; then
+	# ---------- набор из трёх файлов (внутренние имена) ----------
+	CORE_FILES=""
+	SETDIR="$WORK"
+	if [ "${TF_FORM:-internal}" = public ]; then
+		SRC_DESC="набор из трёх файлов (публичные имена файлов)"
+		info "формат выпуска: набор из трёх файлов (публичные имена файлов)."
+	else
+		SRC_DESC="набор из трёх файлов (внутренние имена пакетов)"
+		info "формат выпуска: набор из трёх файлов (внутренние имена пакетов)."
+	fi
+	# Версии — из MANIFEST.txt выпуска, если он есть (необязателен):
+	#   core219_version / core250_version / luci_version (полные, вида X.Y-rN).
+	if [ ! -s "$WORK/MANIFEST.txt" ]; then
+		fetch "$BASE/MANIFEST.txt" "$WORK/MANIFEST.txt" 2>/dev/null || true
+	fi
+	if [ -s "$WORK/MANIFEST.txt" ]; then
+		CORE219_VER=$(sed -n 's/^core219_version:[[:space:]]*//p' "$WORK/MANIFEST.txt" | head -n1)
+		CORE250_VER=$(sed -n 's/^core250_version:[[:space:]]*//p' "$WORK/MANIFEST.txt" | head -n1)
+		PANEL_VER=$(sed -n 's/^luci_version:[[:space:]]*//p' "$WORK/MANIFEST.txt" | head -n1)
+	fi
+	# Выбор ядер по CSQTT_CORES; имена берутся из манифеста.
+	TF_MANIFEST="$MANIFEST"
+	for cv in $(tf_core_versions); do
+		set_tf_core "$cv"
+		CORE_FILES="${CORE_FILES:+$CORE_FILES }$TF_C_NAME"
+		case "$cv" in
+			2.1.9) CORE219_NAME=$TF_C_NAME; CORE219_SHA=$TF_C_SHA ;;
+			2.5.0) CORE250_NAME=$TF_C_NAME; CORE250_SHA=$TF_C_SHA ;;
+		esac
+	done
+	# Основное ядро — для сравнения установленной версии (2.1.9, если выбрано).
+	# tf_core_versions печатает по версии в строке; переводим переводы строк в
+	# пробелы, иначе шаблон *" 2.1.9 "* не совпадёт (после 2.1.9 идёт \n).
+	case " $(tf_core_versions | tr '\n' ' ') " in
+		*" 2.1.9 "*) PRIMARY_PKG=csqtt-core-2.1.9 ;;
+		*) PRIMARY_PKG=csqtt-core-2.5.0 ;;
+	esac
+	if [ "$PANEL_ONLY" = 1 ]; then PRIMARY_PKG=luci-app-csqtt; fi
+	CORE_NAME=$PRIMARY_PKG
+	if [ "$PANEL_ONLY" = 1 ]; then CORE_NAME=""; fi
+	# Версия основного ядра (полная, если есть MANIFEST.txt; иначе — из имени).
+	CORE_VER=""
+	case "$PRIMARY_PKG" in
+		csqtt-core-2.1.9) CORE_VER=$CORE219_VER ;;
+		csqtt-core-2.5.0) CORE_VER=$CORE250_VER ;;
+		luci-app-csqtt) CORE_VER=$PANEL_VER ;;
+	esac
+	# Если релиз пакета неизвестен (нет MANIFEST.txt), установщик сравнивает
+	# базовые версии без суффикса -rN: в имени набора стоит только версия.
+	TF_STRIP_REL=0
+	if [ -z "$CORE_VER" ]; then
+		CORE_VER=$(printf '%s' "$PRIMARY_PKG" | sed 's/^csqtt-core-//')
+		TF_STRIP_REL=1
+	fi
+	# Панель — необязательна (режим «только ядро» её не ставит).
+	PANEL_NAME=""
+	PANEL_SHA=""
+	if [ "$CORE_ONLY" != 1 ]; then
+		PANEL=$(pick_tf_panel "$MANIFEST")
+		[ -n "$PANEL" ] || die "в наборе из трёх файлов нет панели luci-app-csqtt_*_all.${PKG_EXT} (выпуск $TAG, ${ARCH})."
+		PANEL_NAME=${PANEL#* }
+		PANEL_SHA=${PANEL%% *}
+	fi
+	# Версия панели: из MANIFEST.txt, иначе — из имени выбранного файла.
+	# Если панель не ставится (режим «только ядро») и MANIFEST.txt нет, версия
+	# остаётся пустой — сравнение с установленной панелью пропускается, а в
+	# плане выводится «?».
+	[ -n "$PANEL_VER" ] || PANEL_VER=$(printf '%s' "${PANEL_NAME:-}" | sed -n 's/^luci-app-csqtt_\([^_]*\)_.*/\1/p')
+	if [ "$PANEL_ONLY" = 1 ]; then
+		[ -n "$PANEL_VER" ] || PANEL_VER=$(printf '%s' "$PANEL_NAME" | sed -n 's/^luci-app-csqtt-\(.*\)-openwrt-.*/\1/p')
+		[ -n "$PANEL_VER" ] || die "не удалось определить версию панели"
+		CORE_VER=$PANEL_VER
+	fi
+	# Версия «пакета» для плана и сравнения — версия основного ядра.
+	PKG_VER="$CORE_VER"
+	PKG_FULL="$CORE_VER"
+	info "ядра:   $CORE_FILES"
+	if [ -n "$PANEL_NAME" ]; then info "панель: $PANEL_NAME"; else info "панель: не ставится (режим «только ядро»)"; fi
+	# Загрузка и проверка контрольных сумм.
+	if [ "$CORE_ONLY" = 1 ]; then
+		log "Загрузка и проверка ядер (режим «только ядро») ..."
+	else
+		log "Загрузка и проверка пакетов набора (три файла) ..."
+	fi
+	for cv in $(tf_core_versions); do
+		case "$cv" in
+			2.1.9) download_and_verify "$CORE219_NAME" "$CORE219_SHA" ;;
+			2.5.0) download_and_verify "$CORE250_NAME" "$CORE250_SHA" ;;
+		esac
+	done
+	if [ "$CORE_ONLY" != 1 ]; then
+		download_and_verify "$PANEL_NAME" "$PANEL_SHA"
+		info "контрольные суммы ядер и панели совпали."
+	else
+		info "контрольные суммы ядер совпали."
+	fi
+elif [ "$SET_KIND" = "direct" ]; then
 	CORE_NAME=${CORE#* }
 	CORE_SHA=${CORE%% *}
 	PANEL_NAME=${PANEL#* }
@@ -787,9 +1130,20 @@ else
 		fi
 	fi
 fi
-if [ -n "${I18N_NAME:-}" ]; then
+if [ "$PANEL_ONLY" != 1 ]; then [ -n "${CORE_FILES:-}" ] || CORE_FILES="$CORE_NAME"; fi
+if [ "$SET_KIND" = "three-file" ]; then
+	# Удаляются при переходе только ЯДРА выбранного состава и (для полного
+	# набора) панель — ровно то, что переустанавливается.
+	DEL_PKGS=""
+	for _cv in $(tf_core_versions); do DEL_PKGS="$DEL_PKGS csqtt-core-$_cv"; done
+	if [ "$CORE_ONLY" != 1 ]; then DEL_PKGS="luci-app-csqtt$DEL_PKGS"; fi
+	DEL_PKGS=${DEL_PKGS# }
+	info "пакеты выпуска: $CORE_FILES${PANEL_NAME:+, $PANEL_NAME} (внутренние имена)"
+elif [ -n "${I18N_NAME:-}" ]; then
+	DEL_PKGS="luci-i18n-csqtt-ru luci-app-csqtt csqtt"
 	info "пакеты выпуска: $CORE_NAME, $PANEL_NAME, $I18N_NAME (перевод отдельным пакетом, legacy)"
 else
+	DEL_PKGS="luci-i18n-csqtt-ru luci-app-csqtt csqtt"
 	info "пакеты выпуска: $CORE_NAME, $PANEL_NAME (русский встроен)"
 fi
 
@@ -801,19 +1155,42 @@ CUR_VER=$(installed_version || true)
 if [ -n "$CUR_VER" ]; then info "установлено сейчас: $CUR_VER"; else info "CSQTT ещё не установлен."; fi
 NEW_VER=$(printf '%s' "${PKG_FULL:-$PKG_VER}" | sed 's/ (release .*//')
 [ -n "$NEW_VER" ] || NEW_VER="$CUR_VER"
+# [ТРИ ФАЙЛА] Если релиз пакета неизвестен (нет MANIFEST.txt), сравниваются
+# базовые версии без суффикса -rN: в имени набора стоит только версия.
+CUR_CMP="$CUR_VER"
+NEW_CMP="$NEW_VER"
+if [ "${TF_STRIP_REL:-0}" = 1 ]; then
+	CUR_CMP=$(printf '%s' "$CUR_VER" | sed 's/-r[0-9][0-9]*$//')
+	NEW_CMP=$(printf '%s' "$NEW_VER" | sed 's/-r[0-9][0-9]*$//')
+fi
 DOWNGRADE=0
-# Строка плана: пустая, если понижения нет; иначе начинается с перевода строки,
-# чтобы в heredoc не появлялась лишняя пустая строка.
-DOWNGRADE_LINE=""
-if [ -n "$CUR_VER" ] && [ -n "$NEW_VER" ] && [ "$NEW_VER" != "$CUR_VER" ] && version_gt "$CUR_VER" "$NEW_VER"; then
+REINSTALL=0
+# Строка плана: пустая, если ни понижения, ни переустановки нет; иначе
+# начинается с перевода строки, чтобы в heredoc не появлялась пустая строка.
+MODE_WARN_LINE=""
+if [ -n "$CUR_VER" ] && [ -n "$NEW_VER" ] && [ "$NEW_CMP" != "$CUR_CMP" ] && version_gt "$CUR_CMP" "$NEW_CMP"; then
 	DOWNGRADE=1
 	info "обнаружено понижение версии пакетов: $CUR_VER -> $NEW_VER (перенумерация выпуска)."
 	if [ "$PM" = opkg ]; then
-		PM_FORCE_DOWNGRADE="--force-downgrade"
+		PM_FORCE="--force-downgrade"
 		info "opkg: установка пойдёт с --force-downgrade (без него opkg печатает «Not downgrading …» и ничего не меняет)."
 	fi
-	DOWNGRADE_LINE="
-    Внимание:    понижение версий пакетов $CUR_VER -> $NEW_VER: замена принудительная${PM_FORCE_DOWNGRADE:+ ($PM_FORCE_DOWNGRADE)}."
+	MODE_WARN_LINE="
+    Внимание:    понижение версий пакетов $CUR_VER -> $NEW_VER: замена принудительная${PM_FORCE:+ ($PM_FORCE)}."
+elif [ -n "$CUR_VER" ] && [ -n "$NEW_VER" ] && [ "$NEW_CMP" = "$CUR_CMP" ]; then
+	# Версия та же — замена содержимого пакетов того же выпуска. opkg без флага
+	# печатает «… installed in root is up to date» и завершается УСПЕХОМ, НЕ
+	# заменяя файлы, поэтому добавляется --force-reinstall. apk сравнивает
+	# содержимое пакета и заменяет сам — флаг ему не нужен.
+	REINSTALL=1
+	if [ "$PM" = opkg ]; then
+		PM_FORCE="--force-reinstall"
+		info "версия пакета $NEW_VER уже установлена: opkg пойдёт с --force-reinstall (без него opkg печатает «… is up to date» и, возвращая успех, НЕ заменяет файлы)."
+	else
+		info "версия пакета $NEW_VER уже установлена: apk заменит пакет при отличии содержимого."
+	fi
+	MODE_WARN_LINE="
+    Внимание:    версия пакетов не изменится ($CUR_VER): содержимое выпуска заменяется принудительной переустановкой${PM_FORCE:+ ($PM_FORCE)}."
 fi
 log "Проверка свободного места ..."
 check_space "$TMPBASE" "$NEED_KB_TMP"
@@ -824,7 +1201,7 @@ pm_update >/dev/null 2>&1 || warn "$PM update не удался (нет сети
 check_dependencies
 log "Проверка совместимости набора ($PM --simulate/--noaction) ..."
 verify_package_set
-if [ "$DRY_RUN" != 1 ]; then
+if [ "$DRY_RUN" != 1 ] && [ "$PANEL_ONLY" != 1 ]; then
 	log "Резервная копия конфигурации ..."
 	backup_config
 fi
@@ -834,7 +1211,10 @@ if service_enabled; then ENABLED_BEFORE=1; fi
 # [CORE-ONLY] Режим + проверка совместимости с оставленной панелью ДО изменений.
 # Панель и ядро одного выпуска согласованы; при обновлении только ядра панель
 # другой версии может не работать. Сравниваем базовые версии (без суффикса -rN).
-if [ "$CORE_ONLY" = 1 ]; then
+if [ "$PANEL_ONLY" = 1 ]; then
+	MODE_DESC="только панель LuCI; ядра и настройки службы сохраняются"
+	info "без установленного ядра панель не сможет управлять подключением; ядра автоматически не устанавливаются"
+elif [ "$CORE_ONLY" = 1 ]; then
 	MODE_DESC="только ядро (панель LuCI и встроенный перевод сохраняются)"
 	inst_panel=$(installed_version_of luci-app-csqtt || true)
 	rel_panel=$(printf '%s' "${PANEL_VER:-}" | sed 's/ (release .*//; s/-r[0-9][0-9]*$//')
@@ -859,6 +1239,7 @@ if install_packages; then
 	info "пакеты установлены."
 else
 	add_rc=$?
+	if [ "$PANEL_ONLY" = 1 ]; then die "установка панели не завершена (код $add_rc); ядра не удалялись и не переустанавливались"; fi
 	# НИКАКОГО удаления по общим ошибкам (зависимости/место/повреждение).
 	if [ "$DOWNGRADE" != 1 ]; then
 		die "$PM установка не удалась (код $add_rc). Пакеты не изменялись. Проверьте место, зависимости и целостность пакетов."
@@ -869,10 +1250,12 @@ else
 		die "для перехода $CUR_VER -> $NEW_VER нужны проверенные пакеты установленной версии. Поместите их в $TMPBASE/csqtt-rollback (или задайте CSQTT_ROLLBACK_DIR) и повторите. Пакеты не удалялись."
 	fi
 	log "Переход: удаление $CUR_VER и установка $NEW_VER (восстановление из $RBDIR) ..."
+	# shellcheck disable=SC2086  # DEL_PKGS — список имён через пробел
 	if [ "$PM" = apk ]; then
-		apk del luci-i18n-csqtt-ru luci-app-csqtt csqtt >/dev/null 2>&1 || true
+		apk del $DEL_PKGS >/dev/null 2>&1 || true
 	else
-		opkg remove luci-i18n-csqtt-ru luci-app-csqtt csqtt >/dev/null 2>&1 || true
+		# shellcheck disable=SC2086
+		opkg remove $DEL_PKGS >/dev/null 2>&1 || true
 	fi
 	if ! install_packages; then
 		warn "установка нового выпуска не удалась — восстанавливаю предыдущую установку."
@@ -899,15 +1282,22 @@ if [ "$DOWNGRADE" = 1 ]; then
 	fi
 	info "версия заменена: $CUR_VER -> ${AFTER_VER:-?}"
 fi
+if [ "$REINSTALL" = 1 ]; then
+	# Версия не менялась (замена содержимого пакетов того же выпуска): факт
+	# замены подтверждает успешная принудительная переустановка менеджером.
+	info "переустановка того же выпуска ($NEW_VER) выполнена: содержимое пакетов заменено."
+fi
 missing=""
 # shellcheck disable=SC2086  # REQUIRED_DEPS — список через пробел без спецсимволов
 for dep in $REQUIRED_DEPS; do
 	dep_ok "$dep" || missing="$missing $dep"
 done
 [ -z "$missing" ] || die "после установки не хватает зависимостей:$missing"
-[ -x "$BIN" ] || die "после установки нет $BIN."
+if [ "$PANEL_ONLY" != 1 ]; then [ -x "$BIN" ] || die "после установки нет $BIN."; fi
 NEW_INSTALLED=$(installed_version || true)
+if [ "$PANEL_ONLY" = 1 ]; then [ -n "$NEW_INSTALLED" ] || die "панель отсутствует после установки"; fi
 info "установлено: ${NEW_INSTALLED:-csqtt}"
+if [ "$PANEL_ONLY" != 1 ]; then
 info "ядро: $("$BIN" version 2>/dev/null | head -n1 || echo '?')"
 if [ "$ENABLED_BEFORE" = 1 ] && ! service_enabled; then
 	if [ -x "$INITD" ]; then "$INITD" enable >/dev/null 2>&1 || true; fi
@@ -917,11 +1307,20 @@ elif service_enabled; then
 else
 	info "автозапуск не включён (включите при необходимости)."
 fi
+fi
 
 # --- 8. дальнейшие шаги -----------------------------------------------------
+# Строка итога — по формату выпуска.
+if [ "$PANEL_ONLY" = 1 ]; then
+	DONE_DESC="только панель LuCI; ядра и служба не изменялись"
+elif [ "$SET_KIND" = "three-file" ]; then
+	DONE_DESC="ядра CSQTT: $CORE_FILES${PANEL_NAME:+ + панель LuCI (русский интерфейс встроен)}"
+else
+	DONE_DESC="пакет ${PKG_VER:-?} + панель LuCI с встроенным русским интерфейсом + ядро CSQTT ${CORE_VER:-?}"
+fi
 cat <<EOF
 
-[+] Готово: CSQTT OpenWrt установлен (пакет ${PKG_VER:-?} + панель LuCI с встроенным русским интерфейсом + ядро CSQTT ${CORE_VER:-?}).
+[+] Готово: CSQTT OpenWrt установлен ($DONE_DESC).
     OpenWrt ${OW_REL}${OW_REV:+ ($OW_REV)}, семейство ${FAMILY}, arch ${ARCH}.
     Источник: $SRC_DESC
 

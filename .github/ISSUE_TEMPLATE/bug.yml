@@ -1,0 +1,48 @@
+name: Ошибка
+description: Сообщить о воспроизводимой проблеме
+title: "[Ошибка]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Не прикладывайте секреты, ссылки подключения, полные конфигурации и личные журналы."
+  - type: input
+    id: versions
+    attributes:
+      label: Версии
+      description: Версии панели, клиентского ядра и сервера, если известны.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Среда
+      description: Версия OpenWrt и архитектура; для серверной ошибки — ОС и архитектура сервера. Личные адреса не нужны.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Как повторить
+      description: Последовательность действий без секретных значений.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемый результат
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактический результат
+      description: Можно добавить обезличенный текст ошибки. Полный конфиг не прикладывать.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Перед отправкой
+      options:
+        - label: В сообщении и приложениях нет паролей, токенов, VK-хешей, device_id, ключей, адресов серверов, аккаунтов и ссылок подключения.
+          required: true

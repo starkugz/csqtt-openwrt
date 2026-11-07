@@ -1,0 +1,21 @@
+name: Улучшение
+description: Предложить новую возможность или изменение поведения
+title: "[Предложение]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую задачу нужно решить
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое поведение
+      description: Пример сценария без личных данных и секретов.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Возможные альтернативы
