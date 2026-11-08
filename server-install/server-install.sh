@@ -254,7 +254,7 @@ port_conflict() {
 	[ "$proto" != tcp ] || option=-ltnp
 	[ "$proto" != udp ] || option=-uanp
 	have "$SS_BIN" || return 2
-	sockets=$("$SS_BIN" "$option" "sport = :$port" 2>/dev/null) || return 2
+	sockets=$("$SS_BIN" -H "$option" "sport = :$port" 2>/dev/null) || return 2
 	[ -n "$sockets" ] || return 1
 	pid=$(sd_show MainPID)
 	[[ $pid =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && sd_is_active || return 0
