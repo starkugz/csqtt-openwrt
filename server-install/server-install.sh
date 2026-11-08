@@ -16,8 +16,9 @@
 #   * health-check и автоматический откат при провале.
 #
 # Границы:
-#   * Инструмент не читает, не печатает и не передаёт секреты конфигурации:
-#     каталог конфигурации копируется/восстанавливается как есть.
+#   * Доступ веб-панели хранится в root-only EnvironmentFile. После успеха
+#     адрес/логин/пароль выводятся пользователю, но не в install.log/argv.
+#     Остальная конфигурация копируется/восстанавливается как есть.
 #   * Замена только бинарника в уже развёрнутом окружении — server-deploy.sh;
 #     здесь `update` дополнительно приводит unit и хелперы к текущему виду.
 #   * Версию ядра/строку «2.5.1» инструмент не присваивает — фиксирует SHA-256
@@ -29,7 +30,7 @@
 set -Eeuo pipefail
 
 readonly TOOL_NAME="csqtt-server-install"
-readonly TOOL_VERSION="1.0"
+readonly TOOL_VERSION="1.1"
 
 # Коды возврата (стабильный контракт для автоматизации).
 readonly EX_OK=0
@@ -117,6 +118,7 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
   install     Развёртывание сервера с нуля: unit, хелперы, каталог, sysctl, запуск.
   update      Обновление бинарника и приведение unit/хелперов к текущему виду.
   status      Понятный статус без изменений (только чтение).
+  credentials Показать сохранённые адрес/логин/пароль панели (только root).
   verify      Проверка службы, здоровья и (необязательно) хеша установленного файла.
   rollback    Точный ручной откат к резервной копии (по умолчанию — последней).
   uninstall   Остановка и удаление unit/хелперов/бинарника (конфигурация сохраняется).
@@ -148,8 +150,9 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
   --force               Выполнить установку, даже если хеш уже совпадает.
   --help, -h            Эта справка.
 
-Секреты (пароли, токены, ключи) не читаются, не печатаются и не передаются в
-аргументах. Резервные копии создаются с правами 0700, файлы — 0600.
+После успешной установки доступ панели показывается в терминале и сохраняется
+в $ENV_FILE (0600). В журнал/аргументы пароль не попадает. При обновлении
+существующие данные сохраняются. Резервные копии: каталоги 0700, файлы 0600.
 EOF
 }
 
@@ -293,8 +296,148 @@ preflight_check() {
 			warn "UDP/$PEER_PORT уже занят; служба освободит только свой процесс (tun-recover)"
 		fi
 	fi
+	if [ -L "$ENV_FILE" ] || { [ -e "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; }; then
+		err "файл доступа должен быть обычным файлом, не ссылкой: $ENV_FILE"
+		fail=1
+	fi
+	# Не подменять неявно пароль, заданный в нестандартном unit.
+	if [ -f "$UNIT_PATH" ] && grep -Eq -- 'CSQTT_WEB_(USER|PASS)=|--web-(user|pass)(=|[[:space:]])' "$UNIT_PATH"; then
+		err "в unit уже заданы данные панели; перенесите их в $ENV_FILE перед update"
+		fail=1
+	fi
 
 	return "$fail"
+}
+
+# Отдельный процесс: не source/eval и не секретные параметры Python/команд.
+# ensure печатает только changed/unchanged; show предназначен владельцу терминала.
+admin_credentials() {
+	local mode="$1" addresses=""
+	if [ "$mode" = show ]; then
+		addresses=$("$IP_BIN" -o addr show scope global 2>/dev/null || true)
+	fi
+	python3 - "$mode" "$ENV_FILE" "$WEB_PORT" "$addresses" <<'PYADMIN'
+import ipaddress
+import os
+import re
+import secrets
+import stat
+import sys
+import tempfile
+from urllib.parse import quote
+
+mode, filename, port, addresses = sys.argv[1:]
+keys = {"CSQTT_WEB_USER", "CSQTT_WEB_PASS", "CSQTT_WEB_SECRET_PATH", "CSQTT_PUBLIC_IP"}
+
+def value(raw):
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if raw.startswith("'"):
+        if not raw.endswith("'") or "'" in raw[1:-1]:
+            raise ValueError()
+        result = raw[1:-1]
+    elif raw.startswith('"'):
+        if not raw.endswith('"'):
+            raise ValueError()
+        result = re.sub(r'\\([\\"`$])', r'\1', raw[1:-1])
+        if '"' in re.sub(r'\\.', '', raw[1:-1]):
+            raise ValueError()
+    else:
+        if any(c in raw for c in "\\\"'"):
+            raise ValueError()
+        result = raw
+    if any(ord(c) < 32 or ord(c) == 127 for c in result):
+        raise ValueError()
+    return result
+
+try:
+    os.umask(0o077)
+    exists = os.path.lexists(filename)
+    old = ""
+    metadata = None
+    if exists:
+        metadata = os.lstat(filename)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise ValueError()
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as source:
+            old = source.read()
+    values = {}
+    for line in old.splitlines():
+        match = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line)
+        if match and match[1] in keys:
+            values[match[1]] = value(match[2])
+    ready = bool(values.get("CSQTT_WEB_USER") and values.get("CSQTT_WEB_PASS"))
+    private = metadata is not None and not metadata.st_mode & 0o077
+    if mode == "check":
+        sys.exit(0 if ready and private else 1)
+    if mode == "ensure":
+        additions = []
+        if not values.get("CSQTT_WEB_USER"):
+            # A previously configured password used the server's default login.
+            username = "admin" if values.get("CSQTT_WEB_PASS") else "csqtt_" + secrets.token_hex(4)
+            additions.append("CSQTT_WEB_USER=" + username)
+        if not values.get("CSQTT_WEB_PASS"):
+            additions.append("CSQTT_WEB_PASS=" + secrets.token_urlsafe(24))
+        if additions:
+            parent = os.path.dirname(filename)
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".csqtt-access-", dir=parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
+                    output.write(old)
+                    if old and not old.endswith("\n"):
+                        output.write("\n")
+                    output.write("\n".join(additions) + "\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, filename)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        else:
+            os.chmod(filename, 0o600)
+        print("changed" if additions or not private else "unchanged")
+    elif mode == "show":
+        if not ready or not private:
+            print("Постоянные данные входа ещё не настроены; повторите install/update новым установщиком.", file=sys.stderr)
+            sys.exit(1)
+        host = values.get("CSQTT_PUBLIC_IP", "")
+        if host:
+            try:
+                parsed = ipaddress.ip_address(host)
+                host = "[" + host + "]" if parsed.version == 6 else host
+            except ValueError:
+                if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?', host):
+                    host = ""
+        if not host:
+            for candidate in re.findall(r'\binet6?\s+([^/\s]+)/', addresses):
+                parsed = ipaddress.ip_address(candidate)
+                if parsed.is_global:
+                    host = "[" + candidate + "]" if parsed.version == 6 else candidate
+                    break
+        host = host or "<IP_СЕРВЕРА>"
+        prefix = values.get("CSQTT_WEB_SECRET_PATH", "").strip("/")
+        suffix = quote(prefix, safe="/") + "/" if prefix else ""
+        print("\nДоступ к веб-панели CSQTT")
+        print("Адрес панели: https://" + host + ":" + port + "/" + suffix)
+        print("Логин: " + values["CSQTT_WEB_USER"])
+        print("Пароль: " + values["CSQTT_WEB_PASS"])
+        print("Сохраните эти данные. Пароль не меняется при перезапуске/обновлении.")
+        print("Файл доступа (только root): " + filename)
+        print("Если указан <IP_СЕРВЕРА>, замените его адресом VPS. Возможен самоподписанный HTTPS-сертификат.")
+    else:
+        raise ValueError()
+except (OSError, UnicodeError, ValueError):
+    print("Не удалось безопасно обработать файл доступа панели; проверьте права и формат CSQTT_WEB_USER/CSQTT_WEB_PASS. Содержимое не выводится.", file=sys.stderr)
+    sys.exit(1)
+PYADMIN
+}
+
+show_admin_credentials() {
+	# Никогда не вызывать через log(): пароль не должен попасть в install.log.
+	admin_credentials show || warn "Данные входа не показаны; проверьте защищённый файл $ENV_FILE"
 }
 
 # --- состояние и блокировка ----------------------------------------------
@@ -665,6 +808,13 @@ make_backup() {
 	_manifest_present "$LIB_DIR/tun-recover.sh" >"$dir/tun_helper_present"
 	chmod 0600 "$dir"/binary_present "$dir"/unit_present \
 		"$dir"/network_helper_present "$dir"/tun_helper_present 2>/dev/null || true
+	# Доступы откатываются всегда, даже с --no-backup-config.
+	_manifest_present "$ENV_FILE" >"$dir/admin_env_present"
+	chmod 0600 "$dir/admin_env_present"
+	if [ -f "$ENV_FILE" ]; then
+		cp -- "$ENV_FILE" "$dir/previous-admin.env"
+		chmod 0600 "$dir/previous-admin.env"
+	fi
 
 	if [ -f "$TARGET_BIN" ]; then
 		cp -p -- "$TARGET_BIN" "$dir/previous-binary"
@@ -696,6 +846,13 @@ _manifest_present() { [ -e "$1" ] && printf 'yes\n' || printf 'no\n'; }
 # Восстановление состояния из резервной копии. Успех — код возврата 0.
 rollback_to_backup() {
 	local bdir="$1" restore_config="$2" had
+	if [ -f "$bdir/admin_env_present" ]; then
+		if [ "$(cat "$bdir/admin_env_present")" = yes ]; then
+			install -m 0600 -- "$bdir/previous-admin.env" "$ENV_FILE" || return 1
+		else
+			rm -f -- "$ENV_FILE" || return 1
+		fi
+	fi
 
 	had=$(cat "$bdir/binary_present" 2>/dev/null || echo no)
 
@@ -853,10 +1010,11 @@ cmd_install() {
 
 	cand_sha=$(sha256_of "$CANDIDATE")
 	if [ -f "$TARGET_BIN" ] && [ "$(sha256_of "$TARGET_BIN")" = "$cand_sha" ] && \
-		[ -f "$UNIT_PATH" ] && health_once; then
+		[ -f "$UNIT_PATH" ] && admin_credentials check && health_once; then
 		if [ "$FORCE" -ne 1 ]; then
 			ok "Кандидат уже установлен (SHA-256 совпадает), служба здорова — изменений не требуется"
 			emit "CSQTT_SERVER_INSTALL_UP_TO_DATE|$SERVICE|$cand_sha"
+			show_admin_credentials
 			return 0
 		fi
 	fi
@@ -872,6 +1030,10 @@ cmd_install() {
 	take_lock
 	bdir=$(make_backup "$mode")
 	step "Резервная копия создана: $bdir"
+	if ! admin_credentials ensure >/dev/null; then
+		err "Не удалось подготовить постоянный доступ панели"
+		auto_rollback "$bdir"
+	fi
 
 	install_service_files
 
@@ -887,6 +1049,7 @@ cmd_install() {
 		ok "Установка завершена: служба активна, проверки пройдены"
 		ok "Откат при необходимости: $TOOL_NAME rollback --backup $bdir"
 		emit "CSQTT_SERVER_INSTALL_OK|$SERVICE|$cand_sha"
+		show_admin_credentials
 		return 0
 	fi
 	auto_rollback "$bdir"
@@ -1065,6 +1228,10 @@ main() {
 	install) cmd_install install ;;
 	update) cmd_install update ;;
 	status) cmd_status ;;
+	credentials)
+		[ "$(id -u)" -eq 0 ] || die "данные входа доступны только root (sudo)" "$EX_USAGE"
+		admin_credentials show
+		;;
 	verify) cmd_verify ;;
 	rollback)
 		local bdir="$BACKUP_DIR"
