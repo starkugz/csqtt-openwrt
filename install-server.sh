@@ -5,6 +5,7 @@ set -euo pipefail
 umask 077
 die() { printf '[x] %s\n' "$*" >&2; exit 2; }
 action=''; yes=0; dry=0; menu=0
+peer_port=''; web_port=''
 local_dir=${CSQTT_SERVER_LOCAL_DIR:-}
 version=${CSQTT_VERSION:-v2.0}
 repo=starkugz/csqtt-openwrt
@@ -14,9 +15,16 @@ while (($#)); do
   --menu) menu=1 ;;
   --yes|-y) yes=1 ;;
   --dry-run) dry=1 ;;
+  --peer-port|--web-port)
+   opt=$1; (($#>=2)) || die "нужно значение $opt"
+   [[ $2 =~ ^[0-9]{1,5}$ ]] && ((10#$2>=1 && 10#$2<=65535)) || die 'порт должен быть числом 1–65535'
+   if [[ $opt == --peer-port ]]; then peer_port=$((10#$2)); else web_port=$((10#$2)); fi
+   shift ;;
   --local-dir) (($#>=2)) || die 'нужен каталог'; local_dir=$2; shift ;;
   --help|-h)
    printf '%s\n' 'bash install-server.sh [--menu | 2.1.9 | 2.5.1 | uninstall] [--yes] [--dry-run]' \
+    '  --peer-port N / --web-port N: порты туннеля UDP / панели TCP.' \
+    '  Без --yes незаданные порты спрашиваются в терминале; --yes сохраняет прежние или стандартные.' \
     '  --local-dir DIR: проверенный локальный комплект Release (без скачивания).' \
     '  CSQTT_VERSION: тег выпуска, по умолчанию v2.0.' \
     'Удаление сохраняет конфигурацию, базу, сертификаты и резервные копии.'
@@ -76,6 +84,8 @@ verified_fetch server-install.sh
 args=()
 ((dry==0)) || args+=(--dry-run)
 ((yes==0)) || args+=(--yes)
+[[ -z $peer_port ]] || args+=(--peer-port "$peer_port")
+[[ -z $web_port ]] || args+=(--web-port "$web_port")
 if [[ $action == uninstall ]]; then
  # No global package removal, firewall flush or unrelated service restart.
  bash "$work/server-install.sh" uninstall "${args[@]}"

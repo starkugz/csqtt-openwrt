@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 readonly TOOL_NAME="csqtt-server-install"
-readonly TOOL_VERSION="1.1"
+readonly TOOL_VERSION="1.2"
 
 # Коды возврата (стабильный контракт для автоматизации).
 readonly EX_OK=0
@@ -50,6 +50,13 @@ UNIT_PATH="${CSQTT_INSTALL_UNIT:-/etc/systemd/system/csqtt.service}"
 IFACE="${CSQTT_INSTALL_IFACE:-csqtt1}"
 PEER_PORT="${CSQTT_INSTALL_PEER_PORT:-46000}"
 WEB_PORT="${CSQTT_INSTALL_WEB_PORT:-46002}"
+PEER_PORT_EXPLICIT=0
+WEB_PORT_EXPLICIT=0
+[ -z "${CSQTT_INSTALL_PEER_PORT+x}" ] || PEER_PORT_EXPLICIT=1
+[ -z "${CSQTT_INSTALL_WEB_PORT+x}" ] || WEB_PORT_EXPLICIT=1
+CURRENT_PEER_PORT=""
+CURRENT_WEB_PORT=""
+INTERACTIVE_PORTS=0
 LE_HTTP_PORT="${CSQTT_INSTALL_LE_PORT:-80}"
 SYSCTL_DIR="${CSQTT_INSTALL_SYSCTL_DIR:-/etc/sysctl.d}"
 RUNTIME_DIR="${CSQTT_INSTALL_RUNTIME_DIR:-/run/csqtt}"
@@ -136,6 +143,7 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
   --iface NAME          Интерфейс (по умолчанию: $IFACE).
   --peer-port N         UDP-порт peer (по умолчанию: $PEER_PORT).
   --web-port N          TCP-порт панели (0 — не проверять; по умолчанию: $WEB_PORT).
+  --interactive-ports  Спросить порты через терминал (также для preflight).
   --sysctl-dir PATH     Каталог sysctl-файлов (по умолчанию: $SYSCTL_DIR).
   --health-cmd CMD      Дополнительная внешняя проверка здоровья (exit 0 = здоров).
   --backup-root PATH    Корень резервных копий (по умолчанию: $BACKUP_ROOT).
@@ -214,6 +222,131 @@ tcp_open() {
 sd_is_active() { "$SYSTEMCTL_BIN" is-active "$SERVICE" >/dev/null 2>&1; }
 sd_show() { "$SYSTEMCTL_BIN" show -p "$1" --value "$SERVICE" 2>/dev/null || true; }
 
+valid_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+reserved_port() { case "$1" in 80 | 46001 | 46003 | 46004) return 0 ;; *) return 1 ;; esac; }
+
+# Только наш явный ExecStart, без исполнения unit/конфигурации.
+load_installed_ports() {
+	local ports
+	[ -f "$UNIT_PATH" ] || return 0
+	ports=$(python3 - "$UNIT_PATH" "$TARGET_BIN" <<'PYPORT'
+import re, sys
+from pathlib import Path
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith('ExecStart=' + sys.argv[2] + ' '):
+        peer = re.search(r'(?:^|\s)--listen\s+0\.0\.0\.0:([0-9]{1,5})(?:\s|$)', line)
+        web = re.search(r'(?:^|\s)--web-port\s+([0-9]{1,5})(?:\s|$)', line)
+        if peer and web:
+            print(peer[1], web[1])
+        break
+PYPORT
+	) || return 0
+	[ -n "$ports" ] || return 0
+	read -r CURRENT_PEER_PORT CURRENT_WEB_PORT <<<"$ports"
+	[ "$PEER_PORT_EXPLICIT" -eq 1 ] || PEER_PORT="$CURRENT_PEER_PORT"
+	[ "$WEB_PORT_EXPLICIT" -eq 1 ] || WEB_PORT="$CURRENT_WEB_PORT"
+}
+
+# 0: чужой/неизвестный сокет; 1: свободно или только MainPID этой службы;
+# 2: проверить не удалось. ss читает обе семьи адресов, без остановки процессов.
+port_conflict() {
+	local proto="$1" port="$2" sockets pid pids one option socket_pid
+	[ "$proto" != tcp ] || option=-ltnp
+	[ "$proto" != udp ] || option=-uanp
+	have "$SS_BIN" || return 2
+	sockets=$("$SS_BIN" "$option" "sport = :$port" 2>/dev/null) || return 2
+	[ -n "$sockets" ] || return 1
+	pid=$(sd_show MainPID)
+	[[ $pid =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && sd_is_active || return 0
+	while IFS= read -r one; do
+		pids=$(grep -oE 'pid=[0-9]+' <<<"$one" | cut -d= -f2 || true)
+		[ -n "$pids" ] || return 0
+		while IFS= read -r socket_pid; do
+			[ "$socket_pid" = "$pid" ] || return 0
+		done <<<"$pids"
+	done <<<"$sockets"
+	return 1
+}
+
+suggest_port() {
+	local proto="$1" candidate="$2" other="$3" n rc
+	for ((n=0; n<64; n++)); do
+		candidate=$((candidate + 1))
+		[ "$candidate" -le 65535 ] || candidate=1024
+		if [ "$candidate" = "$other" ] || reserved_port "$candidate"; then continue; fi
+		if port_conflict "$proto" "$candidate"; then rc=0; else rc=$?; fi
+		if [ "$rc" -eq 1 ]; then printf '%s\n' "$candidate"; return 0; fi
+		[ "$rc" -ne 2 ] || return 1
+	done
+	return 1
+}
+
+check_port_selection() {
+	local fail=0 proto port rc suggestion
+	if ! valid_port "$PEER_PORT"; then
+		err "порт туннеля должен быть числом 1–65535"; return 1
+	fi
+	# Значение WEB=0 оставлено для прежнего CLI: отключить web health-check.
+	if [ "$WEB_PORT" != 0 ] && ! valid_port "$WEB_PORT"; then
+		err "порт панели должен быть числом 1–65535"; return 1
+	fi
+	PEER_PORT=$((10#$PEER_PORT))
+	[ "$WEB_PORT" = 0 ] || WEB_PORT=$((10#$WEB_PORT))
+	if [ "$PEER_PORT" = "$WEB_PORT" ] || reserved_port "$PEER_PORT" || reserved_port "$WEB_PORT"; then
+		err "выберите разные порты, кроме служебных 80/46001/46003/46004"; return 1
+	fi
+	for proto in udp tcp; do
+		if [ "$proto" = udp ]; then port="$PEER_PORT"; else port="$WEB_PORT"; fi
+		[ "$port" != 0 ] || continue
+		if port_conflict "$proto" "$port"; then rc=0; else rc=$?; fi
+		case "$rc" in
+		0)
+			err "$proto/$port занят посторонним процессом или владелец не определён; чужие службы не останавливаются"
+			suggestion=$(suggest_port "$proto" "$port" "$([ "$proto" = udp ] && echo "$WEB_PORT" || echo "$PEER_PORT")" || true)
+			[ -z "$suggestion" ] || warn "свободный вариант: $proto/$suggestion (требуется ваш выбор)"
+			fail=1 ;;
+		1) : ;;
+		*) err "не удалось проверить $proto/$port через ss; установка остановлена"; fail=1 ;;
+		esac
+	done
+	return "$fail"
+}
+
+choose_ports_interactive() {
+	local proto label chosen default explicit other raw rc suggestion
+	(: </dev/tty) 2>/dev/null || die "для выбора портов нужен терминал; задайте --peer-port/--web-port" "$EX_USAGE"
+	for proto in udp tcp; do
+		if [ "$proto" = udp ]; then
+			label='Порт туннеля (UDP)'; default="$PEER_PORT"; explicit="$PEER_PORT_EXPLICIT"; other="$WEB_PORT"
+		else
+			label='Порт панели (TCP)'; default="$WEB_PORT"; explicit="$WEB_PORT_EXPLICIT"; other="$PEER_PORT"
+		fi
+		[ "$explicit" -eq 0 ] || continue
+		while :; do
+			printf '%s [%s]: ' "$label" "$default" >/dev/tty
+			IFS= read -r raw </dev/tty || die "выбор портов отменён" "$EX_USAGE"
+			chosen="${raw:-$default}"
+			if ! valid_port "$chosen"; then printf 'Введите число 1–65535.\n' >/dev/tty; continue; fi
+			chosen=$((10#$chosen))
+			if [ "$chosen" = "$other" ] || reserved_port "$chosen"; then
+				printf 'Этот номер выбран для другой роли или зарезервирован CSQTT.\n' >/dev/tty; continue
+			fi
+			if port_conflict "$proto" "$chosen"; then rc=0; else rc=$?; fi
+			if [ "$rc" -eq 2 ]; then die "не удалось проверить свободные порты через ss" "$EX_PREFLIGHT"; fi
+			if [ "$rc" -eq 0 ]; then
+				printf '%s/%s занят. ' "$proto" "$chosen" >/dev/tty
+				suggestion=$(suggest_port "$proto" "$chosen" "$other" || true)
+				if [ -n "$suggestion" ]; then default="$suggestion"; printf 'Свободный вариант: %s; Enter подтверждает его.\n' "$default" >/dev/tty
+				else printf 'Укажите другой номер.\n' >/dev/tty; fi
+				continue
+			fi
+			if [ "$proto" = udp ]; then PEER_PORT="$chosen"; else WEB_PORT="$chosen"; fi
+			break
+		done
+	done
+	printf 'Выбраны порты: туннель UDP/%s, панель TCP/%s.\n' "$PEER_PORT" "$WEB_PORT" >&2
+}
+
 # --- предварительная проверка --------------------------------------------
 
 preflight_check() {
@@ -290,12 +423,7 @@ preflight_check() {
 		fi
 	fi
 
-	# Занятость UDP-порта peer чужим процессом.
-	if have "$SS_BIN"; then
-		if "$SS_BIN" -H -lun "sport = :$PEER_PORT" 2>/dev/null | grep -q .; then
-			warn "UDP/$PEER_PORT уже занят; служба освободит только свой процесс (tun-recover)"
-		fi
-	fi
+	check_port_selection || fail=1
 	if [ -L "$ENV_FILE" ] || { [ -e "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; }; then
 		err "файл доступа должен быть обычным файлом, не ссылкой: $ENV_FILE"
 		fail=1
@@ -316,7 +444,7 @@ admin_credentials() {
 	if [ "$mode" = show ]; then
 		addresses=$("$IP_BIN" -o addr show scope global 2>/dev/null || true)
 	fi
-	python3 - "$mode" "$ENV_FILE" "$WEB_PORT" "$addresses" <<'PYADMIN'
+	python3 - "$mode" "$ENV_FILE" "$WEB_PORT" "$addresses" "$PEER_PORT" <<'PYADMIN'
 import ipaddress
 import os
 import re
@@ -326,7 +454,7 @@ import sys
 import tempfile
 from urllib.parse import quote
 
-mode, filename, port, addresses = sys.argv[1:]
+mode, filename, port, addresses, peer_port = sys.argv[1:]
 keys = {"CSQTT_WEB_USER", "CSQTT_WEB_PASS", "CSQTT_WEB_SECRET_PATH", "CSQTT_PUBLIC_IP"}
 
 def value(raw):
@@ -422,6 +550,7 @@ try:
         suffix = quote(prefix, safe="/") + "/" if prefix else ""
         print("\nДоступ к веб-панели CSQTT")
         print("Адрес панели: https://" + host + ":" + port + "/" + suffix)
+        print("Порт туннеля (UDP): " + peer_port)
         print("Логин: " + values["CSQTT_WEB_USER"])
         print("Пароль: " + values["CSQTT_WEB_PASS"])
         print("Сохраните эти данные. Пароль не меняется при перезапуске/обновлении.")
@@ -467,10 +596,16 @@ confirm() {
 		return 0
 	fi
 	if [ ! -t 0 ]; then
-		die "нет терминала для подтверждения; используйте --yes" "$EX_USAGE"
+		if (: </dev/tty) 2>/dev/null; then
+			printf '%s [y/N]: ' "$prompt" >/dev/tty
+			read -r ans </dev/tty || ans=""
+		else
+			die "нет терминала для подтверждения; используйте --yes" "$EX_USAGE"
+		fi
+	else
+		printf '%s [y/N]: ' "$prompt" >&2
+		read -r ans || ans=""
 	fi
-	printf '%s [y/N]: ' "$prompt" >&2
-	read -r ans || ans=""
 	case "$ans" in
 	y | Y | yes | YES) return 0 ;;
 	*) die "отменено пользователем" "$EX_USAGE" ;;
@@ -791,12 +926,12 @@ make_backup() {
 	printf '%s\n' "$action" >"$dir/action"
 	printf '%s\n' "$SERVICE" >"$dir/service"
 	printf '%s\n' "$IFACE" >"$dir/iface"
-	printf '%s\n' "$WEB_PORT" >"$dir/web_port"
+	printf '%s\n' "${CURRENT_WEB_PORT:-$WEB_PORT}" >"$dir/web_port"
 	printf '%s\n' "$CONFIG_DIR" >"$dir/config_dir"
 	printf '%s\n' "$TARGET_BIN" >"$dir/target_bin"
 	printf '%s\n' "$UNIT_PATH" >"$dir/unit_path"
 	printf '%s\n' "$LIB_DIR" >"$dir/lib_dir"
-	printf '%s\n' "$PEER_PORT" >"$dir/peer_port"
+	printf '%s\n' "${CURRENT_PEER_PORT:-$PEER_PORT}" >"$dir/peer_port"
 	chmod 0600 "$dir"/timestamp "$dir"/action "$dir"/service \
 		"$dir"/iface "$dir"/web_port "$dir"/config_dir "$dir"/target_bin \
 		"$dir"/unit_path "$dir"/lib_dir "$dir"/peer_port 2>/dev/null || true
@@ -853,6 +988,9 @@ rollback_to_backup() {
 			rm -f -- "$ENV_FILE" || return 1
 		fi
 	fi
+	# Health-check отката должен использовать прежние, а не новые порты.
+	[ ! -f "$bdir/peer_port" ] || PEER_PORT=$(cat "$bdir/peer_port")
+	[ ! -f "$bdir/web_port" ] || WEB_PORT=$(cat "$bdir/web_port")
 
 	had=$(cat "$bdir/binary_present" 2>/dev/null || echo no)
 
@@ -1010,7 +1148,8 @@ cmd_install() {
 
 	cand_sha=$(sha256_of "$CANDIDATE")
 	if [ -f "$TARGET_BIN" ] && [ "$(sha256_of "$TARGET_BIN")" = "$cand_sha" ] && \
-		[ -f "$UNIT_PATH" ] && admin_credentials check && health_once; then
+		[ -f "$UNIT_PATH" ] && [ "$PEER_PORT" = "$CURRENT_PEER_PORT" ] && \
+		[ "$WEB_PORT" = "$CURRENT_WEB_PORT" ] && admin_credentials check && health_once; then
 		if [ "$FORCE" -ne 1 ]; then
 			ok "Кандидат уже установлен (SHA-256 совпадает), служба здорова — изменений не требуется"
 			emit "CSQTT_SERVER_INSTALL_UP_TO_DATE|$SERVICE|$cand_sha"
@@ -1028,6 +1167,7 @@ cmd_install() {
 	confirm "Установить/обновить сервер CSQTT ($SERVICE) и запустить службу?"
 
 	take_lock
+	check_port_selection || die "порты изменились перед установкой; повторите выбор" "$EX_PREFLIGHT"
 	bdir=$(make_backup "$mode")
 	step "Резервная копия создана: $bdir"
 	if ! admin_credentials ensure >/dev/null; then
@@ -1188,8 +1328,9 @@ parse_args() {
 		--config-dir) CONFIG_DIR="${2:-}"; shift 2 ;;
 		--unit) UNIT_PATH="${2:-}"; shift 2 ;;
 		--iface) IFACE="${2:-}"; shift 2 ;;
-		--peer-port) PEER_PORT="${2:-}"; shift 2 ;;
-		--web-port) WEB_PORT="${2:-}"; shift 2 ;;
+		--peer-port) PEER_PORT="${2:-}"; PEER_PORT_EXPLICIT=1; shift 2 ;;
+		--web-port) WEB_PORT="${2:-}"; WEB_PORT_EXPLICIT=1; shift 2 ;;
+		--interactive-ports) INTERACTIVE_PORTS=1; shift ;;
 		--sysctl-dir) SYSCTL_DIR="${2:-}"; shift 2 ;;
 		--health-cmd) HEALTH_CMD="${2:-}"; shift 2 ;;
 		--backup-root) BACKUP_ROOT="${2:-}"; shift 2 ;;
@@ -1221,6 +1362,13 @@ main() {
 	parse_args "$@"
 	[ -n "$STATE_DIR" ] || STATE_DIR="$BACKUP_ROOT/state"
 	[ -n "$ENV_FILE" ] || ENV_FILE="$CONFIG_DIR/csqtt.env"
+	load_installed_ports
+	case "$ACTION" in
+	install | update)
+		if [ "$YES" -eq 0 ] && (: </dev/tty) 2>/dev/null; then INTERACTIVE_PORTS=1; fi
+		;;
+	esac
+	if [ "$INTERACTIVE_PORTS" -eq 1 ]; then choose_ports_interactive; fi
 
 	case "${ACTION:-help}" in
 	help) usage; exit "$EX_OK" ;;
