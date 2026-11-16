@@ -248,7 +248,7 @@ VK-хеши, `device_id`) в `status`/логах не выводятся; `devic
 **Установка** (на роутере по SSH):
 
 ```sh
-wget --no-proxy -qO /tmp/csqtt-install.sh https://raw.githubusercontent.com/starkugz/csqtt-openwrt/v2.0/install-csqtt.sh \
+wget --no-proxy -qO /tmp/csqtt-install.sh https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-csqtt.sh \
   && ash /tmp/csqtt-install.sh --menu
 ```
 

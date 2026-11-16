@@ -273,14 +273,18 @@ warn() { printf '[!] %s\n' "$*" >&2; }
 download() {
 	# download <url> <out>  (не исполняет загруженные данные)
 	if command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -O "$2" "$1"
-	elif command -v wget >/dev/null 2>&1; then
-		wget --no-proxy -q -O "$2" "$1" 2>/dev/null || wget -q -O "$2" "$1"
-	elif command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1" -o "$2"
-	else
-		return 1
+		uclient-fetch --no-proxy -q -O "$2" "$1" && [ -s "$2" ] && return 0
+		uclient-fetch -q -O "$2" "$1" && [ -s "$2" ] && return 0
 	fi
+	if command -v wget >/dev/null 2>&1; then
+		wget --no-proxy -q -O "$2" "$1" && [ -s "$2" ] && return 0
+		wget -q -O "$2" "$1" && [ -s "$2" ] && return 0
+	fi
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$1" -o "$2" && [ -s "$2" ] && return 0
+	fi
+	rm -f "$2"
+	return 1
 }
 
 # fetch <url-or-local> <out>
@@ -897,7 +901,13 @@ if [ -z "$SET_KIND" ] \
 fi
 
 if [ -n "$INSTALL_SET" ] && [ "$SET_KIND" != "three-file" ]; then
-	die "выбор состава требует выпуска с самостоятельными пакетами ядер и панели"
+	if [ ! -s "$MANIFEST" ]; then
+		if [ -n "$LOCAL_DIR" ]; then
+			die "не удалось прочитать SHA256SUMS в $LOCAL_DIR (файл отсутствует или пуст)"
+		fi
+		die "не удалось скачать SHA256SUMS выпуска $TAG. Проверьте доступ с роутера к $BASE/SHA256SUMS"
+	fi
+	die "в SHA256SUMS выпуска $TAG нет распознанных самостоятельных пакетов ядер формата .$PKG_EXT для выбранного состава"
 fi
 if [ "$SET_KIND" = "three-file" ]; then
 	# ---------- набор из трёх файлов (внутренние имена) ----------
