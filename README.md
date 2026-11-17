@@ -15,7 +15,7 @@ f=$(mktemp) && wget -qO "$f" https://github.com/starkugz/csqtt-openwrt/releases/
 
 Для одного компонента укажите `install --set core` или `install --set panel`
 после `sh "$f"`. Ручная установка и список архитектур приведены в
-[инструкции для OpenWrt](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/README.md).
+[инструкции для OpenWrt](docs/install-v2.5.3.md).
 
 **MediaTek MT7621 (`ramips/mt7621`, `mipsel_24kc`).** При ручной установке
 скачайте только нужные пакеты своей линии.
@@ -37,7 +37,7 @@ f=$(mktemp) && curl -fLsS -o "$f" https://github.com/starkugz/csqtt-openwrt/rele
 ```
 
 Требования и настройка после запуска описаны в
-[инструкции для VPS](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/SERVER-README.md).
+[инструкции для VPS](docs/server-v2.5.3.md).
 
 Команды установки предыдущих версий и список изменений доступны в [архиве выпусков](https://github.com/starkugz/csqtt-openwrt/releases).
 
