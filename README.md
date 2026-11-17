@@ -4,9 +4,40 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Доп�
 
 ## Установка
 
-1. Откройте [последний выпуск](https://github.com/starkugz/csqtt-openwrt/releases/latest).
-2. В разделе «Установка» выберите инструкцию для **роутера OpenWrt** или **сервера Linux**. Команды, пакеты, поддерживаемые архитектуры и контрольные суммы приведены в соответствующем выпуске.
-3. Если сервер уже есть, настройте профиль подключения на роутере. В LuCI откройте **Службы → CSQTT**.
+### Роутер OpenWrt
+
+Выполните по SSH от `root`. Установщик подберёт пакеты по версии OpenWrt
+и архитектуре и предложит установить ядро и панель.
+
+```sh
+f=$(mktemp) && wget -qO "$f" https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/install-router.sh && sh "$f"
+```
+
+Для одного компонента укажите `install --set core` или `install --set panel`
+после `sh "$f"`. Ручная установка и список архитектур приведены в
+[инструкции для OpenWrt](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/README.md).
+
+**MediaTek MT7621 (`ramips/mt7621`, `mipsel_24kc`).** При ручной установке
+скачайте только нужные пакеты своей линии.
+
+| OpenWrt | Ядро | Панель LuCI |
+|---|---|---|
+| 24.10.8 / `opkg` | [IPK](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/csqtt-core-2.5.3-openwrt-24.10.8-ramips-mt7621-mipsel_24kc.ipk) | [IPK](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/luci-app-csqtt-2.5-openwrt-24.10.8-all.ipk) |
+| 25.12.5 / `apk` | [APK](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/csqtt-core-2.5.3-openwrt-25.12.5-ramips-mt7621-mipsel_24kc.apk) | [APK](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/luci-app-csqtt-2.5-openwrt-25.12.5-all.apk) |
+
+Перед ручной установкой сверьте скачанные файлы с
+[`SHA256SUMS`](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/SHA256SUMS).
+
+### Сервер Linux / VPS
+
+Выполните по SSH на VPS от `root` для открытия меню выбора сервера.
+
+```sh
+f=$(mktemp) && curl -fLsS -o "$f" https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/install-server.sh && sh "$f" --menu
+```
+
+Требования и настройка после запуска описаны в
+[инструкции для VPS](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/SERVER-README.md).
 
 Команды установки предыдущих версий и список изменений доступны в [архиве выпусков](https://github.com/starkugz/csqtt-openwrt/releases).
 
