@@ -27,15 +27,13 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 
 ## Установка с GitHub
 
-Выполните на роутере по SSH от root. Установщик предложит подтвердить
-установку ядра и панели.
+Выполните на роутере по SSH от root. Выберите ядро с панелью, только ядро или только панель.
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/install-router.sh && sh "$f"
+f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" --menu
 ```
 
-Для установки одного компонента добавьте к `sh "$f"`
-`install --set core` для ядра или `install --set panel` для панели. Скрипт определяет
+Для выбора версии панели без ядра см. [команды для панели](../README.md#только-панель-luci). Установщик определяет
 линию OpenWrt и архитектуру и сверяет контрольные суммы пакетов.
 
 На OpenWrt с APK короткий установщик при необходимости добавляет

@@ -6,15 +6,15 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Доп�
 
 ### Роутер OpenWrt
 
-Выполните по SSH от `root`. Установщик подберёт пакеты по версии OpenWrt
-и архитектуре и предложит установить ядро и панель.
+Выполните по SSH от `root`. В меню можно выбрать ядро с панелью,
+только ядро или только панель. Пакеты подбираются по версии OpenWrt
+и архитектуре роутера.
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/install-router.sh && sh "$f"
+f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" --menu
 ```
 
-Для одного компонента укажите `install --set core` или `install --set panel`
-после `sh "$f"`. Ручная установка и список архитектур приведены в
+Ручная установка и список архитектур приведены в
 [инструкции для OpenWrt](docs/install-v2.5.3.md).
 
 **MediaTek MT7621 (`ramips/mt7621`, `mipsel_24kc`).** При ручной установке
@@ -27,6 +27,25 @@ f=$(mktemp) && wget -qO "$f" https://github.com/starkugz/csqtt-openwrt/releases/
 
 Перед ручной установкой сверьте скачанные файлы с
 [`SHA256SUMS`](https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/SHA256SUMS).
+
+### Только панель LuCI
+
+Выполните на роутере по SSH от `root`. Выберите версию панели под уже
+установленное ядро. Каждая команда устанавливает только выбранную панель.
+
+**Панель 2.5** из выпуска `v2.5.3`:
+
+```sh
+f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" 2.5
+```
+
+**Панель 2.0** из выпуска `v2.0`:
+
+```sh
+f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" 2.0
+```
+
+Добавьте `--dry-run` после номера версии, чтобы посмотреть план установки.
 
 ### Сервер Linux / VPS
 
