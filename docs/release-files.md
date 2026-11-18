@@ -121,8 +121,8 @@
 
 Серверные файлы **не входят** в 23 файла выпуска выше — это отдельная поставка.
 Серверных вариантов два; оба устанавливаются одними и теми же инструментами
-([`server-install.sh`](../server/legacy/server-install/README.md),
-[`server-deploy.sh`](../server/legacy/server-deploy/README.md)) и выбираются вручную (без
+([`server-install.sh`](../server/legacy/install/README.md),
+[`server-deploy.sh`](../server/legacy/deploy/README.md)) и выбираются вручную (без
 автопереключения).
 
 | Вариант | Источник | SHA-256 бинарника | Распространение |
