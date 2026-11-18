@@ -1,3 +1,17 @@
+<details>
+<summary>Поддержать проект</summary>
+
+Помочь разработчику можно переводом USDT в выбранной сети.
+
+| Сеть | Адрес USDT |
+|---|---|
+| <img src="https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ton/info/logo.png" width="18" height="18" alt="TON"> TON | `UQBnHRqEArYe9Bcr9IEnowbUIMbqhqFXaazyexZ526-UFmFq` |
+| <img src="https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/tron/info/logo.png" width="18" height="18" alt="Tron / TRC-20"> Tron / TRC-20 | `TPRwuz9935hxvKWHDoaP8ZLNA4zxj5N9kH` |
+| <img src="https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png" width="18" height="18" alt="Ethereum / ERC-20"> Ethereum / ERC-20 | `0x7AF71AE59473950C35Cbbe0C5bdE1EA2F0760AdF` |
+| <img src="https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png" width="18" height="18" alt="Solana / SPL"> Solana / SPL | `4QAEDtzTnX57vah1cG7j7XTAqei6j1opZw9Kb5LLH9bH` |
+
+</details>
+
 # CSQTT для OpenWrt
 
 [![Release](https://img.shields.io/github/v/release/starkugz/csqtt-openwrt?label=release&color=2583e9)](https://github.com/starkugz/csqtt-openwrt/releases/latest)
@@ -31,17 +45,3 @@ curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install
 
 Исходный проект — amurcanov. Интеграция OpenWrt и панель — starkugz.
 [Лицензия](LICENSE) · [Уведомления](NOTICE.md)
-
-<details>
-<summary>Поддержать проект</summary>
-
-Помочь разработчику можно переводом USDT в выбранной сети.
-
-| Сеть | Адрес USDT |
-|---|---|
-| TON | `UQBnHRqEArYe9Bcr9IEnowbUIMbqhqFXaazyexZ526-UFmFq` |
-| Tron / TRC-20 | `TPRwuz9935hxvKWHDoaP8ZLNA4zxj5N9kH` |
-| Ethereum / ERC-20 | `0x7AF71AE59473950C35Cbbe0C5bdE1EA2F0760AdF` |
-| Solana / SPL | `4QAEDtzTnX57vah1cG7j7XTAqei6j1opZw9Kb5LLH9bH` |
-
-</details>
