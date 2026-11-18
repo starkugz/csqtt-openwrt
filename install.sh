@@ -6,13 +6,13 @@ install_csqtt() (
     set -eu
     umask 077
     if [ -f /etc/openwrt_release ]; then
-        installer=install-router.sh
-        sha=937451cbb04c9c5c4f659da10a08c4631ef898f77d4d0a80c01bc6c49f95e65a
+        installer=router/install.sh
+        sha=e61764d504c75f9b1f13fa104cd26bd9c9dce564f3b36a8c3b1523c3f60a3fbc
         platform=OpenWrt
         [ "$#" -gt 0 ] || set -- install --menu
     else
-        installer=install-server.sh
-        sha=72c47678c36e367696634dbe3bc9c6d95f53c73286140a94e5293106b1d0eb7e
+        installer=server/install.sh
+        sha=c0966fb549c137ce86274bdf3b6c3555154f51d44f745e55921f6635e02e78d7
         platform=VPS
         [ "$#" -gt 0 ] || set -- --menu
     fi

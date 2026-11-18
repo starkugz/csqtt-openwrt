@@ -44,13 +44,13 @@ SHA-256 скачанных пакетов. Для OpenWrt 24.10.8 использ
 **Панель 2.5** из выпуска `v2.5.3`:
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" 2.5
+f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/router/install-openwrt.sh && sh "$f" 2.5
 ```
 
 **Панель 2.0** из выпуска `v2.0`:
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" 2.0
+f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/router/install-openwrt.sh && sh "$f" 2.0
 ```
 
 Добавьте `--dry-run` после номера версии, чтобы посмотреть план установки.
@@ -102,3 +102,9 @@ WAN, DNS, маршрутов и firewall.
 ## Лицензия
 
 Исходный проект CSQTT — **amurcanov**. Интеграция OpenWrt и панель — **starkugz**. Условия использования и сведения об авторах приведены в [LICENSE](LICENSE) и [NOTICE.md](NOTICE.md).
+
+## Разделы репозитория
+
+- [OpenWrt](router/) — установка на роутер.
+- [Сервер VPS](server/) — установка и бинарники Linux.
+- [Инструкции](docs/README.md) — настройка и решение проблем.

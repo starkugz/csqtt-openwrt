@@ -45,7 +45,7 @@ case "$(uname -s):$(uname -m):$version" in
     *) die 'Для выбранной версии и архитектуры нет серверного пакета.' ;;
 esac
 
-base=https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3
+base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/b7afa632a97e0d79aa7ee581ee4e698c87fd945f/server/v2.5.3
 backend=server-install.sh
 backend_sha=abe5f1f4f2670ea0ed190d6935e2aba4e93e0641c6d8a61abc31e20ca0bf18f6
 source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -61,7 +61,7 @@ stage_asset() {
         curl --fail --silent --show-error --location --proto '=https' \
             --proto-redir '=https' --connect-timeout 15 --max-time 180 \
             --output "$work/$1" "$(if [ "$1" = "$backend" ]; then
-                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/server-install.sh'
+                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/server/backend.sh'
             else
                 printf '%s' "$base/$1"
             fi)"
