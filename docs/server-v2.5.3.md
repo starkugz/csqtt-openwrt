@@ -10,9 +10,7 @@
 | 2.5.3 | x86-64, AArch64, ARMv7 |
 | 2.1.9 | x86-64, оригинальный бинарник amurcanov из выпуска [v2.0](https://github.com/starkugz/csqtt-openwrt/releases/tag/v2.0) |
 
-Скачайте установщик выпуска
-[`v2.5.3`](https://github.com/starkugz/csqtt-openwrt/releases/tag/v2.5.3)
-и запустите меню на сервере.
+Выполните команду на VPS, чтобы открыть меню установки.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh
@@ -23,17 +21,15 @@ curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install
 версию напрямую и добавьте `--dry-run`.
 
 ```sh
-sudo sh "$f" 2.5.3 --dry-run
+curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh -s -- 2.5.3 --dry-run
 ```
 
 Установщик проверяет SHA-256 выбранного ELF и скрипта развёртывания.
-Для локальной установки положите оба файла рядом с `install-server.sh`.
-Полный скачанный комплект можно проверить командой
-`sha256sum -c SHA256SUMS`.
+Серверные бинарники и контрольные суммы находятся в [папке сервера](../server/v2.5.3/).
 
 Установщик настраивает службу systemd, конфигурацию и сетевые ресурсы
 сервера. Параметры службы, порты и варианты развёртывания доступны через
-`bash ./server-install.sh --help`. После установки выполните
+[скрипт развёртывания](../server/backend.sh). После установки выполните
 `systemctl status csqtt` и проверьте соединение с клиентом выбранной версии.
 Для диагностики используйте `journalctl -u csqtt`. При запуске именованного
 экземпляра указывайте его имя службы.
@@ -56,5 +52,5 @@ sudo sh "$f" 2.5.3 --dry-run
 При ошибке сертификата проверьте доменное имя и цепочку TLS на HTTPS-порту
 панели.
 
-Установка роутера описана в [README этого выпуска](install-v2.5.3.md).
-Лицензия и обязательные уведомления входят в выпуск.
+Установка роутера описана в [инструкции OpenWrt](install-v2.5.3.md).
+Лицензия и обязательные уведомления находятся рядом с [бинарниками](../server/v2.5.3/).
