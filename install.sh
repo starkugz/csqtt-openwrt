@@ -3,10 +3,10 @@
 install_csqtt() (
     set -eu
     umask 077
-    base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/7e06bb6f31c4b4ff02dece30509ffd102edca7a2
+    base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/84a89183b5b9307c90acaf225029cacf4a35c23f
     if [ -f /etc/openwrt_release ]; then
         installer=router/install.sh
-        sha=587a0c1b72b1f4778ebccab23c94b06c42bba0608ae767f92de85fc1ec386c32
+        sha=d92da0010c75ef0fea41b493605c8ecd9f4a5fefec3970afb97c533bd06f6ec5
         platform=OpenWrt
         case "${1:---menu}" in
             --menu) [ "$#" -eq 0 ] || shift; set -- install --menu "$@" ;;
