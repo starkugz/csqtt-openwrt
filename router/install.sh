@@ -92,7 +92,7 @@ cleanup() {
 
 install_router() {
     base=${CSQTT_RELEASE_BASE_URL:-https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3}
-    sha=e515ba67a6dc15ce918977278d78961b4a8053afffb9c525425860a8baaec354
+    sha=a260bfb7c0ad31516f3ca72f2838cf282c31edd7289dd28b4c239b4fe5599a72
     work=$(mktemp -d)
     added_dependencies=
     trap cleanup EXIT
