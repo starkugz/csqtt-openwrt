@@ -150,7 +150,11 @@ csqtt log tail -n 50
 Панель и /etc/config/csqtt сохраняются. Для возобновления работы
 переустановите ядро и запустите службу.
 
-Для удаления только панели используйте `sh "$f" uninstall --set panel`.
+Для удаления только панели выполните команду по SSH:
+
+```sh
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- uninstall --set panel
+```
 Служба CSQTT продолжит работу.
 Если после удаления LuCI ещё показывает пункт CSQTT, выполните
 `/etc/init.d/rpcd reload` и обновите страницу.
