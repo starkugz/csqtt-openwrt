@@ -40,7 +40,7 @@ panel) required="luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout" ;;
 both) required="kmod-tun luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout" ;;
 *) exit 0 ;;
 esac
-if [ "$set_name" != panel ] && grep -q '^mipsel' "$root/etc/apk/arch" 2>/dev/null; then
+if [ "$set_name" != panel ] && printf '%s\n' "${CSQTT_DEP_ARCH:-$(cat "$root/etc/apk/arch" 2>/dev/null)}" | grep -q '^mipsel'; then
 	required="$required libgcc1"
 fi
 missing=
@@ -56,7 +56,7 @@ if [ "$yes" -ne 1 ]; then
 	case "$answer" in y | Y | yes | YES) ;; *) exit 66 ;; esac
 fi
 mkdir -p "$cache"
-apk --cache-dir "$cache" update >&2
+apk --cache-dir "$cache" update >&2 || exit 1
 LC_ALL=C apk --cache-dir "$cache" add --simulate $missing >"$cache/plan" 2>&1 || {
 	cat "$cache/plan" >&2
 	exit 1
@@ -94,7 +94,7 @@ cleanup() {
 
 install_router() {
     base=${CSQTT_RELEASE_BASE_URL:-https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3}
-    sha=f7138a3dce9866224d6cb463aad6a0e72680971d95dd4081164dea733b3d08b3
+    sha=fa60073e0971076ef117bfee06a9feabfeaf5e1adbf50962cf249094852e0f91
     assume_yes=0
     for arg in "$@"; do
         case "$arg" in
@@ -106,7 +106,7 @@ install_router() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/8295af2bf63e127f7725187420749b218b3d9ea3/router/install-csqtt.sh"
+    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/41d2e78560b3e5fb9f3ca60b8b66fbcde691723a/router/install-csqtt.sh"
     printf '%s  %s\n' "$sha" "$work/install-csqtt.sh" | sha256sum -c -
 
     if [ "$#" -eq 0 ]; then
