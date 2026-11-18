@@ -1335,8 +1335,38 @@ probe_core219() {
 	return 0
 }
 
+menu_remove_select() {
+	printf '\nУдаление компонентов CSQTT\n' >&2
+	printf '  1) только панель CSQTT\n' >&2
+	printf '  2) только ядро 2.5.3\n' >&2
+	printf '  3) только ядро 2.1.9\n' >&2
+	printf '  4) оба ядра (панель останется)\n' >&2
+	printf '  5) панель и все ядра\n' >&2
+	printf '\nКонфигурация и профили сохраняются.\n' >&2
+	printf '  0) отмена\n\nЧто удалить > ' >&2
+	read -r _remove_ans || _remove_ans=""
+	ACTION=uninstall
+	CORE_BRANCH=""
+	CORE_VERSION=2.5.3
+	CORE_PACKAGE=csqtt-core-2.5.3
+	case "$_remove_ans" in
+	0) exit 0 ;;
+	1) INSTALL_SET=panel ;;
+	2) INSTALL_SET=core; CORE_BRANCH=2.5.3 ;;
+	3) INSTALL_SET=core; CORE_BRANCH=2.1.9 ;;
+	4) INSTALL_SET=core ;;
+	5) INSTALL_SET=both ;;
+	*) die "неизвестный выбор удаления: $_remove_ans" "$EX_USAGE" ;;
+	esac
+}
+
 menu_select() {
 	[ -t 0 ] || die "для --menu нужен TTY; без TTY укажите --set core|panel|both" "$EX_USAGE"
+	if [ "$ACTION" = uninstall ]; then
+		detect_pm_soft
+		menu_remove_select
+		return 0
+	fi
 	_menu_color=""
 	_menu_reset=""
 	if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
@@ -1378,7 +1408,7 @@ menu_select() {
 		_menu_del=4
 	fi
 	case "$ACTION" in
-	install | update | uninstall) printf '  %s) удалить\n' "$_menu_del" >&2 ;;
+	install | update) printf '  %s) удалить компоненты…\n' "$_menu_del" >&2 ;;
 	esac
 	printf '\n  0) отмена\n\n' >&2
 	printf 'Ваш выбор > ' >&2
@@ -1387,28 +1417,24 @@ menu_select() {
 	0) exit 0 ;;
 	1)
 		INSTALL_SET="both"
+		CORE_BRANCH=2.5.3
 		CORE_VERSION=2.5.3
 		CORE_PACKAGE=csqtt-core-2.5.3
 		;;
 	2)
 		INSTALL_SET="core"
+		CORE_BRANCH=2.5.3
 		CORE_VERSION=2.5.3
 		CORE_PACKAGE=csqtt-core-2.5.3
 		;;
-	3) INSTALL_SET="panel" ;;
+	3) INSTALL_SET="panel"; CORE_BRANCH="" ;;
 	"$_menu_del")
 		case "$ACTION" in
 		install | update)
-			INSTALL_SET="both"
-			ACTION="uninstall"
+			menu_remove_select
 			;;
-		uninstall) INSTALL_SET="both" ;;
 		*) die "для удаления запустите uninstall --set both" "$EX_USAGE" ;;
 		esac
-		# Для удаления важно то, что установлено, а не выбранная ветка ядра.
-		CORE_VERSION=2.5.3
-		CORE_PACKAGE=csqtt-core-2.5.3
-		CORE_BRANCH=""
 		;;
 	4)
 		[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
@@ -1846,14 +1872,32 @@ cmd_uninstall() {
 	if [ "$PURGE" -eq 1 ] && [ "$INSTALL_SET" = "panel" ]; then
 		die "--purge с --set panel удалил бы /etc/config/csqtt при установленном ядре; используйте --set both или сначала удалите ядро" "$EX_USAGE"
 	fi
+	_ui_cores="csqtt-core-2.1.9 csqtt-core-2.5.3"
+	[ -z "$CORE_BRANCH" ] || _ui_cores=$CORE_PACKAGE
+	_ui_selected=""
+	if [ "$INSTALL_SET" = panel ] || [ "$INSTALL_SET" = both ]; then
+		_ui_selected=$PANEL_PACKAGE
+	fi
+	if [ "$INSTALL_SET" = core ] || [ "$INSTALL_SET" = both ]; then
+		_ui_selected="$_ui_selected $_ui_cores"
+	fi
 	if [ "$DRY_RUN" -eq 1 ]; then
-		ok "dry-run: будут удалены: $INSTALL_SET"
+		ok "dry-run: будут удалены: $_ui_selected"
 		ok "конфигурация /etc/config/csqtt сохраняется$([ "$PURGE" -eq 1 ] && echo ' (--purge: будет удалена)')"
 		emit "DRY_RUN|uninstall|$INSTALL_SET"
 		return 0
 	fi
-	confirm "Удалить CSQTT ($INSTALL_SET)? Конфигурация сохраняется, если не указан --purge."
 	take_lock
+	_ui_present=0
+	for _ui_pkg in $_ui_selected; do
+		[ -z "$(installed_version_of "$_ui_pkg")" ] || _ui_present=1
+	done
+	if [ "$_ui_present" -eq 0 ] && [ "$PURGE" -eq 0 ]; then
+		ok "Выбранные компоненты уже отсутствуют; изменений не требуется"
+		emit "UNINSTALLED|$INSTALL_SET"
+		return 0
+	fi
+	confirm "Удалить $_ui_selected? Конфигурация сохраняется, если не указан --purge."
 	ensure_state
 	BACKUP=$(make_backup "uninstall") || true
 	[ -n "$BACKUP" ] && printf '%s\n' "$BACKUP" >"$STATE_DIR/last-backup"
@@ -1872,8 +1916,6 @@ cmd_uninstall() {
 		# [057] Явный --core-version 2.1.9 удаляет только это ядро; без него
 		# (меню или обычный --set core) удаляются оба возможных ядра, чтобы
 		# установленное ядро не осталось незамеченным.
-		_ui_cores="csqtt-core-2.1.9 csqtt-core-2.5.3"
-		[ -z "$CORE_BRANCH" ] || _ui_cores=$CORE_PACKAGE
 		for _ui_cp in $_ui_cores; do
 			[ -n "$(installed_version_of "$_ui_cp")" ] || continue
 			pm_remove "$_ui_cp" || _ui_fail=1
