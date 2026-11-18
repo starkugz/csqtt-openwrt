@@ -49,9 +49,7 @@ install_csqtt() (
     elif ( : </dev/tty ) 2>/dev/null; then
         sh "$work/installer.sh" "$@" </dev/tty
     else
-        printf 'Откройте SSH-терминал для выбора установки.
-' >&2
-        exit 2
+        sh "$work/installer.sh" "$@"
     fi
 )
 install_csqtt "$@"
