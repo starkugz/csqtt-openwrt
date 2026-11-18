@@ -1,3 +1,5 @@
+> Инструкция предыдущего выпуска 2.0. Для текущих серверов 2.1.9 и 2.5.3 используйте [установку сервера](server-v2.5.3.md).
+
 # Свой сервер CSQTT на VPS
 
 Серверная часть CSQTT устанавливается на арендованный сервер (VPS) **отдельно**
@@ -109,8 +111,8 @@ Let's Encrypt), права **root**.
 | **Сервер 2.5.1** | база CSQTT 2.5.0 + community-патч `01` | `csqtt-server-linux-amd64` | `6bb29d0e…9d35` |
 
 Оба варианта устанавливаются **одними и теми же инструментами**
-([`server-install.sh`](../server-install/README.md) — с нуля, обновление, откат;
-[`server-deploy.sh`](../server-deploy/README.md) — замена бинарника): инструмент
+([`server-install.sh`](../server/legacy/server-install/README.md) — с нуля, обновление, откат;
+[`server-deploy.sh`](../server/legacy/server-deploy/README.md) — замена бинарника): инструмент
 не присваивает версию, а фиксирует SHA-256 конкретного входного файла. Откат —
 штатный для обоих.
 
@@ -266,7 +268,7 @@ sudo bash server-install.sh credentials
 
 ## Установка с нуля — `server-install.sh`
 
-Установку «с нуля» выполняет [`server-install.sh`](../server-install/README.md).
+Установку «с нуля» выполняет [`server-install.sh`](../server/legacy/server-install/README.md).
 Он повторяет схему официального `deploy.sh` из серверного архива community:
 создаёт `systemd`-unit `csqtt`, хелперы `network-up.sh`/`tun-recover.sh`,
 каталог `/etc/csqtt`, файлы `sysctl`, выполняет health-check и при провале
@@ -301,13 +303,13 @@ sudo bash server-install.sh uninstall --yes
 ```
 
 Подробности, коды возврата и маркеры — в
-[`../server-install/README.md`](../server-install/README.md).
+[`../server/legacy/server-install/README.md`](../server/legacy/server-install/README.md).
 
 ## Обновление и откат — `server-deploy.sh`
 
 Если сервер уже развёрнут (служба `csqtt` установлена) и нужно заменить
 **только бинарник**, без изменения unit и хелперов, используйте
-[`server-deploy.sh`](../server-deploy/README.md). Он проверяет
+[`server-deploy.sh`](../server/legacy/server-deploy/README.md). Он проверяет
 ОС/архитектуру/ELF и обязательный SHA-256, делает резервную копию, перезапускает
 только службу `csqtt`, выполняет health-check и при провале **автоматически
 откатывается**.
@@ -375,22 +377,7 @@ sudo bash server-deploy.sh rollback --backup /var/lib/csqtt-deploy/<...> --yes
 `--no-backup-config`, `--restore-config`, `--yes`, `--force`.
 
 Полное описание, маркеры stdout и коды — в
-[`../server-deploy/README.md`](../server-deploy/README.md).
-
-## Статус проверки (честно)
-
-- **Выполнено локально:**
-  - закреплённый артефакт **сервера 2.1.9**: скачан APK, SHA-256 всего APK и
-    извлечённого `assets/csqtt-linux-amd64` совпали с закреплёнными; ELF x86-64,
-    static musl, `--protocol-revision` = `CSQTT-WIRE-3` (живой сервер не
-    запускался).
-  - `server-install.sh` (с нуля, обновление, откат, `status`, `verify`,
-    `uninstall`, `dry-run`) на временной файловой системе с фиктивными
-    `systemctl`/`ip`/`iptables`/`ss`/`sysctl`; плюс с настоящими бинарниками
-    обоих вариантов (ELF x86-64 + SHA-256).
-  - `server-deploy.sh` (замена бинарника) — на временной файловой системе, плюс
-    SHA-256 обоих вариантов.
-- **Живая установка:** в согласованном окне последовательно установлены оба варианта; SHA, служба и порты проверены, итоговый сервер 2.5.1. Панель по сохранённому секретному пути отвечает 200; 3X-UI и учётные данные сохранены. Реальный откат, внешний сертификат и клиентский трафик не проверялись.
+[`../server/legacy/server-deploy/README.md`](../server/legacy/server-deploy/README.md).
 
 ## Серверные бинарники
 
@@ -399,5 +386,5 @@ sudo bash server-deploy.sh rollback --backup /var/lib/csqtt-deploy/<...> --yes
 Все исполняемые файлы покрыты общим SHA256SUMS. Бинарники в этом комплекте —
 только Linux x86-64; наличие arm64 в официальном APK не означает его включения.
 
-Для установки из Release используйте [команды проверки и установки](../server-install/CHECK-SERVER.md).
+Для установки из Release используйте [команды проверки и установки](../server/legacy/server-install/CHECK-SERVER.md).
 Описанное выше извлечение официального 2.1.9 из APK остаётся альтернативным способом.

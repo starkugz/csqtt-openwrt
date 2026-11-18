@@ -6,7 +6,7 @@ Noncommercial 1.0.0, раздел «Notices»).
 
 ## Основная лицензия
 
-PolyForm Noncommercial License 1.0.0 — полный текст в [`LICENSE`](LICENSE).
+PolyForm Noncommercial License 1.0.0 — полный текст в [`LICENSE`](../LICENSE).
 
 > Required Notice: Copyright 2026 amurcanov
 
@@ -14,7 +14,7 @@ PolyForm Noncommercial License 1.0.0 — полный текст в [`LICENSE`](
 
 - **Ядро CSQTT** (протокол, транспорт, пул профилей, CAPTCHA) — оригинальная
   разработка проекта CSQTT, автор **amurcanov** (focsq-совместимое ядро).
-  Ядро этого выпуска — **2.5.3**; прежние ядра 2.1.9/2.5.1 в выпуск не входят.
+  Клиентские ядра выпуска — **2.5.3** и **2.1.9**; панель — **CSQTT 2.5**.
 - Данная редакция **star-panel-csqtt** добавляет интеграцию в OpenWrt
   (init-скрипт, UCI-схема, упаковка `.apk`) и панель LuCI (JS-вью, rpcd-ucode),
   а также локальные исправления. Автор редакции — **starkugz**. Изменения
