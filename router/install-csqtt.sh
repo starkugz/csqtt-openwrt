@@ -1463,6 +1463,7 @@ confirm() {
 	[ -t 0 ] || die "нет терминала для подтверждения; используйте --yes" "$EX_USAGE"
 	printf '%s [y/N]: ' "$1" >&2
 	read -r _c_ans || _c_ans=""
+	_c_ans=$(printf '%s' "$_c_ans" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 	case "$_c_ans" in
 	y | Y | yes | YES) return 0 ;;
 	*) die "отменено пользователем" "$EX_USAGE" ;;
@@ -1692,7 +1693,7 @@ dep_prepare() {
 		die "не найден хук зависимостей: $CSQTT_DEP_HOOK" "$EX_PREFLIGHT"
 	_dp_rc=0
 	CSQTT_DEP_SET=$INSTALL_SET CSQTT_DEP_PM=${PM:-none} \
-		CSQTT_DEP_ACTION=$_ci_mode CSQTT_DEP_CORE=$CORE_PACKAGE \
+		CSQTT_DEP_ACTION=$_ci_mode CSQTT_DEP_CORE=$CORE_PACKAGE CSQTT_DEP_ARCH=$ARCH \
 		sh "$CSQTT_DEP_HOOK" || _dp_rc=$?
 	case "$_dp_rc" in
 	0) return 0 ;;
@@ -1701,7 +1702,7 @@ dep_prepare() {
 		return 66
 		;;
 	*)
-		die "подготовка зависимостей не удалась (код $_dp_rc); изменения не вносились" \
+		die "подготовка зависимостей не удалась (код $_dp_rc); проверьте сообщения восстановления" \
 			"$EX_PREFLIGHT"
 		;;
 	esac
@@ -1713,10 +1714,7 @@ cmd_install() { # cmd_install install|update
 	require_release
 	detect_pm
 	detect_series
-	# Сухой прогон ничего не меняет, поэтому зависимости не готовятся.
-	if [ "$DRY_RUN" -eq 0 ] && ! dep_prepare; then
-		return 0
-	fi
+
 	validate_pins
 	take_lock
 	keep_core253=0
@@ -1781,7 +1779,13 @@ cmd_install() { # cmd_install install|update
 			_ci_avail=$(pkg_version_of_file "$WORK/$_ci_file")
 			if [ -n "$_ci_inst" ] && [ -n "$_ci_avail" ]; then
 				case "$(ver_cmp "$_ci_avail" "$_ci_inst")" in
-				0) ok "$_ci_label: уже установлена актуальная версия"; continue ;;
+				0)
+					ok "$_ci_label: актуальная версия уже установлена"
+					case "$_ci_pkg" in
+					"$PANEL_PACKAGE") SELECTED_PANEL="" ;;
+					*) SELECTED_CORE="" ;;
+					esac
+					continue ;;
 				1) ok "$_ci_label: доступно обновление" ;;
 				*) die "$_ci_label: установленная версия новее выпуска; автоматическое понижение отменено" "$EX_PREFLIGHT" ;;
 				esac
@@ -1807,6 +1811,11 @@ cmd_install() { # cmd_install install|update
 
 	step "Проверка свободного места"
 	space_preflight
+
+	# Зависимости добавляются после проверки файлов, SHA, версий и места.
+	if [ "$DRY_RUN" -eq 0 ] && ! dep_prepare; then
+		return 0
+	fi
 
 	step "Проверка совместимости набора ($PM)"
 	if ! pm_dry_run_selected; then
