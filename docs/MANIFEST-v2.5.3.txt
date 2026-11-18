@@ -22,6 +22,6 @@ csqtt-core-2.5.3-openwrt-25.12.5-ramips-mt7621-mipsel_24kc.apk | 10640665 | 618a
 csqtt-core-2.5.3-openwrt-25.12.5-sunxi-cortexa7-arm_cortex-a7_neon-vfpv4.apk | 10322404 | 41cd7dada0f492613ed5641ce7395363b8265be6635e1b716ab54f822d662fd3
 csqtt-core-2.5.3-openwrt-25.12.5-x86-64-x86_64.apk | 11975602 | 6f4da14d7b5fdae7c4bc85767a30527501fa8b88cd2cd28e6faf1e62dd3c6d59
 csqtt-core-2.5.3-openwrt-snapshot-mediatek-filogic-aarch64_cortex-a53.apk | 11198584 | a34b520a7a2f8d41bcacd3160203fb1c77661716e51ea5e43cdaff47d7a1e146
-luci-app-csqtt-2.5-openwrt-24.10.8-all.ipk | 164175 | 5e5bead12dc66243d424528e8dbc64f20156572062419185bcd9f959aa3dcb9b
-luci-app-csqtt-2.5-openwrt-25.12.5-all.apk | 163382 | c7df94904512cb502bccf2cad4f0bc9308280cf5aa16079df416a0c639b79380
-luci-app-csqtt-2.5-openwrt-snapshot-all.apk | 163382 | c7df94904512cb502bccf2cad4f0bc9308280cf5aa16079df416a0c639b79380
+luci-app-csqtt-2.5-openwrt-24.10.8-all.ipk | 164497 | 1490c05d762dcd2dd88c502b70a5d129a74c193f6257ba3010e13366f72ea257
+luci-app-csqtt-2.5-openwrt-25.12.5-all.apk | 163693 | e7c81331935eb244be0e7d22925706a37adced50483c72dff086e90ae06dca74
+luci-app-csqtt-2.5-openwrt-snapshot-all.apk | 163693 | e7c81331935eb244be0e7d22925706a37adced50483c72dff086e90ae06dca74
