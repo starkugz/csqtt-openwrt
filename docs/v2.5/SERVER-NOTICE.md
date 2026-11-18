@@ -12,7 +12,7 @@ Noncommercial 1.0.0, раздел «Notices»).
 
 ## Основная лицензия
 
-PolyForm Noncommercial License 1.0.0 — полный текст в [`LICENSE`](../LICENSE).
+PolyForm Noncommercial License 1.0.0 — полный текст в [`LICENSE`](../../LICENSE).
 
 > Required Notice: Copyright 2026 amurcanov
 

@@ -1,4 +1,4 @@
-[![Поддержать проект · USDT](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%BF%D1%80%D0%BE%D0%B5%D0%BA%D1%82-USDT-e83e8c?style=for-the-badge&logo=tether&logoColor=white)](https://github.com/starkugz/csqtt-openwrt/blob/main/docs/support.md)
+[![Поддержать проект · USDT](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%BF%D1%80%D0%BE%D0%B5%D0%BA%D1%82-USDT-e83e8c?style=for-the-badge&logo=tether&logoColor=white)](https://github.com/starkugz/csqtt-openwrt/blob/main/docs/common/support.md)
 
 | Сеть | Адрес USDT |
 |---|---|
@@ -10,8 +10,8 @@
 # CSQTT для OpenWrt
 
 [![Release](https://img.shields.io/github/v/release/starkugz/csqtt-openwrt?label=release&color=2583e9)](https://github.com/starkugz/csqtt-openwrt/releases/latest)
-[![OpenWrt](https://img.shields.io/badge/OpenWrt-24.10%20%7C%2025.12-00a6c4)](docs/install-v2.5.3.md#пакеты-openwrt)
-[![Architectures](https://img.shields.io/badge/CPU-AArch64%20%7C%20ARMv7%20%7C%20x86--64%20%7C%20MIPSel-6366f1)](docs/install-v2.5.3.md#пакеты-openwrt)
+[![OpenWrt](https://img.shields.io/badge/OpenWrt-24.10%20%7C%2025.12-00a6c4)](docs/v2.5/install.md#пакеты-openwrt)
+[![Architectures](https://img.shields.io/badge/CPU-AArch64%20%7C%20ARMv7%20%7C%20x86--64%20%7C%20MIPSel-6366f1)](docs/v2.5/install.md#пакеты-openwrt)
 [![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-80a820)](LICENSE)
 
 Туннель CSQTT для OpenWrt с панелью LuCI. Клиентские ядра **2.5.3** и **2.1.9**,
@@ -33,8 +33,8 @@ wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/in
 curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh
 ```
 
-[Инструкция OpenWrt](docs/install-v2.5.3.md) ·
-[Инструкция VPS](docs/server-v2.5.3.md) ·
+[Инструкция OpenWrt](docs/v2.5/install.md) ·
+[Инструкция VPS](docs/v2.5/server.md) ·
 [Все инструкции](docs/README.md) ·
 [Пакеты APK/IPK](https://github.com/starkugz/csqtt-openwrt/releases/latest)
 
