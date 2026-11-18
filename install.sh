@@ -12,6 +12,25 @@ install_csqtt() (
         case "${1:---menu}" in
             --menu) [ "$#" -eq 0 ] || shift; set -- install --menu "$@" ;;
             2.5) shift; set -- install --set panel "$@" ;;
+            --release)
+                [ "$#" -ge 2 ] || { printf 'Укажите выпуск: --release v2.0 или --release v2.5.3\n' >&2; exit 2; }
+                release=$2
+                shift 2
+                case "$release" in
+                    v2.0|2.0)
+                        base=https://github.com/starkugz/csqtt-openwrt/releases/download/v2.0
+                        installer=install-csqtt.sh
+                        sha=94dc5af61df134841c7b148af4876ca7d0ee80ff19b520e773bd5ca2bc4e8a7d
+                        legacy_download=1
+                        export CSQTT_VERSION=v2.0
+                        [ "$#" -gt 0 ] || set -- --menu
+                        ;;
+                    v2.5.3|2.5.3)
+                        [ "$#" -gt 0 ] || set -- install --menu
+                        ;;
+                    *) printf 'Неизвестный выпуск: %s. Доступны v2.0 и v2.5.3.\n' "$release" >&2; exit 2 ;;
+                esac
+                ;;
             2.0)
                 shift
                 base=https://github.com/starkugz/csqtt-openwrt/releases/download/v2.0
@@ -47,7 +66,7 @@ install_csqtt() (
     printf '%s  %s
 ' "$sha" "$work/installer.sh" | sha256sum -c -
     # Старый установщик выбирает uclient-fetch без резервного транспорта.
-    # Подмена действует только для дочернего процесса установки панели 2.0.
+    # Подмена действует только для дочернего установщика выпуска 2.0.
     if [ "$legacy_download" -eq 1 ]; then
         cat >"$work/uclient-fetch" <<'LEGACY_FETCH'
 #!/bin/sh
