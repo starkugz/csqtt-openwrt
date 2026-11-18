@@ -21,7 +21,7 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 ## Выберите, что установить
 
 - **Роутер OpenWrt.** Запустите короткую команду ниже.
-- **Сервер Linux.** Используйте `install-server.sh` из того же выпуска.
+- **Сервер Linux.** Используйте [установщик VPS](server-v2.5.3.md).
   В меню доступны сервер 2.5.3 для x86-64, ARM64 и ARMv7 и сервер 2.1.9
   для x86-64. См. [установку сервера](server-v2.5.3.md).
 
@@ -33,7 +33,7 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
-Для выбора версии панели без ядра см. [команды для панели](../README.md#только-панель-luci). Установщик определяет
+Для выбора версии панели без ядра см. [команды для панели](#только-панель-luci). Установщик определяет
 линию OpenWrt и архитектуру и сверяет контрольные суммы пакетов.
 
 На OpenWrt с APK короткий установщик при необходимости добавляет
@@ -175,3 +175,21 @@ csqtt log tail -n 50
 ## Настройка источника пакетов
 
 Пример настроек — [installer-release.conf.example](installer-release.conf.example).
+
+## Только панель LuCI
+
+Выполните по SSH от root. Ядро устанавливается отдельным пунктом основного меню.
+
+Панель 2.5:
+
+```sh
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.5
+```
+
+Панель 2.0:
+
+```sh
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.0
+```
+
+Добавьте `--dry-run` после номера версии для просмотра плана.
