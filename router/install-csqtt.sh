@@ -1680,12 +1680,43 @@ activate_core253() {
 		[ "$(readlink "$ROOT/usr/bin/csqtt" 2>/dev/null)" = "$_ac_controller" ]
 }
 
+# [058] Подготовка зависимостей внешней обёрткой (короткая установка).
+# Короткий install-router.sh не знает состав до интерактивного меню, поэтому
+# подготовка выполняется здесь: состав и менеджер пакетов уже определены, но
+# никаких изменений ещё не было. Хук получает точный набор (только ядро не
+# тянет LuCI) и либо готовит пакеты, либо отказывает кодом 66 — тогда
+# установщик завершается успешно и ничего не меняет.
+dep_prepare() {
+	[ -n "${CSQTT_DEP_HOOK:-}" ] || return 0
+	[ -f "$CSQTT_DEP_HOOK" ] ||
+		die "не найден хук зависимостей: $CSQTT_DEP_HOOK" "$EX_PREFLIGHT"
+	_dp_rc=0
+	CSQTT_DEP_SET=$INSTALL_SET CSQTT_DEP_PM=${PM:-none} \
+		CSQTT_DEP_ACTION=$_ci_mode CSQTT_DEP_CORE=$CORE_PACKAGE \
+		sh "$CSQTT_DEP_HOOK" || _dp_rc=$?
+	case "$_dp_rc" in
+	0) return 0 ;;
+	66)
+		ok "установка отменена до изменений; зависимости не добавлены"
+		return 66
+		;;
+	*)
+		die "подготовка зависимостей не удалась (код $_dp_rc); изменения не вносились" \
+			"$EX_PREFLIGHT"
+		;;
+	esac
+}
+
 cmd_install() { # cmd_install install|update
 	_ci_mode=$1
 	resolve_set
 	require_release
 	detect_pm
 	detect_series
+	# Сухой прогон ничего не меняет, поэтому зависимости не готовятся.
+	if [ "$DRY_RUN" -eq 0 ] && ! dep_prepare; then
+		return 0
+	fi
 	validate_pins
 	take_lock
 	keep_core253=0
