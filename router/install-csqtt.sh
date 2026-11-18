@@ -515,9 +515,16 @@ fetch() { # fetch URL OUT
 	return "$_fetch_rc"
 }
 
+release_url() {
+	case "$BASE_URL" in
+	https://github.com/*/releases/download/*) printf '%s/%s?csqtt=%s-%s\n' "$BASE_URL" "$1" "$(date +%s)" "$$" ;;
+	*) printf '%s/%s\n' "$BASE_URL" "$1" ;;
+	esac
+}
+
 fetch_manifest() {
 	[ -d "$WORK" ] || mkdir -p "$WORK"
-	if ! fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS"; then
+	if ! fetch "$(release_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
 		die "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть); изменения не вносились" "$EX_PREFLIGHT"
 	fi
 	[ -s "$WORK/SHA256SUMS" ] || die "SHA256SUMS пуст; выпуск неполный, изменения не вносились" "$EX_PREFLIGHT"
@@ -587,7 +594,7 @@ download_asset() { # download_asset "hash name" component
 	case "$_dl_name" in
 	*/* | "" | . | ..) die "недопустимое имя файла в SHA256SUMS: $_dl_name" "$EX_PREFLIGHT" ;;
 	esac
-	if ! fetch "$BASE_URL/$_dl_name" "$WORK/$_dl_name"; then
+	if ! fetch "$(release_url "$_dl_name")" "$WORK/$_dl_name"; then
 		if [ -n "$PIN_NAME" ]; then
 			emit "ARTIFACT_CHANGED|reason:unavailable|component:$INSTALL_SET|name:$_dl_name"
 			die "проверенный файл $_dl_name недоступен (404 или сеть); повторите проверку обновлений" "$EX_PREFLIGHT"
@@ -1312,7 +1319,7 @@ probe_core219() {
 	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) return 0 ;; esac
 	[ -n "$PKG_EXT" ] || return 0
 	mkdir -p "$WORK" 2>/dev/null || return 0
-	fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
+	fetch "$(release_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
 	[ -s "$WORK/SHA256SUMS" ] || return 0
 	CORE219_AVAILABLE=0
 	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
@@ -1340,6 +1347,20 @@ menu_select() {
 	printf 'Проверка доступных компонентов…\n' >&2
 	probe_core219
 	printf '%s · %s · %s\n\n' "${SERIES:-OpenWrt}" "${ARCH:-архитектура не определена}" "${PKG_EXT:-пакеты}" >&2
+	printf 'На устройстве:\n' >&2
+	for _mi_pkg in csqtt-core-2.5.3 csqtt-core-2.1.9 "$PANEL_PACKAGE"; do
+		_mi_ver=$(installed_version_of "$_mi_pkg")
+		case "$_mi_pkg" in
+		csqtt-core-*) _mi_label="Ядро ${_mi_pkg#csqtt-core-}" ;;
+		*) _mi_label="Панель CSQTT" ;;
+		esac
+		if [ -n "$_mi_ver" ]; then
+			printf '  %s: уже установлено (%s)\n' "$_mi_label" "${_mi_ver%-r*}" >&2
+		else
+			printf '  %s: не установлено\n' "$_mi_label" >&2
+		fi
+	done
+	printf 'Установленные компоненты будут проверены на обновление.\n\n' >&2
 	printf '%sВыберите состав:%s\n' "$_menu_color" "$_menu_reset" >&2
 	printf '  1) ядро 2.5.3 и панель\n' >&2
 	printf '  2) только ядро 2.5.3\n' >&2
@@ -1687,6 +1708,44 @@ cmd_install() { # cmd_install install|update
 		if [ "$INSTALL_SET" = "panel" ] && [ -z "$(installed_version_of "$PANEL_PACKAGE")" ]; then
 			die "update: панель $PANEL_PACKAGE не установлена; для первой установки используйте install" "$EX_PREFLIGHT"
 		fi
+	fi
+
+	# В интерактивном меню актуальный компонент не переустанавливается.
+	# Прямой install сохраняет прежнюю семантику восстановления пакета.
+	if [ "$MENU" -eq 1 ]; then
+		_ci_pending=""
+		_ci_effective=""
+		for _ci_file in $FILES; do
+			case "$_ci_file" in
+			luci-app-*) _ci_pkg=$PANEL_PACKAGE; _ci_label="панель" ;;
+			*) _ci_pkg=$CORE_PACKAGE; _ci_label="ядро" ;;
+			esac
+			_ci_inst=$(installed_version_of "$_ci_pkg")
+			_ci_avail=$(pkg_version_of_file "$WORK/$_ci_file")
+			if [ -n "$_ci_inst" ] && [ -n "$_ci_avail" ]; then
+				case "$(ver_cmp "$_ci_avail" "$_ci_inst")" in
+				0) ok "$_ci_label: уже установлена актуальная версия"; continue ;;
+				1) ok "$_ci_label: доступно обновление" ;;
+				*) die "$_ci_label: установленная версия новее выпуска; автоматическое понижение отменено" "$EX_PREFLIGHT" ;;
+				esac
+			else
+				ok "$_ci_label: требуется установка"
+			fi
+			_ci_pending="$_ci_pending $_ci_file"
+			case "$_ci_pkg" in
+			"$PANEL_PACKAGE") _ci_part=panel ;;
+			*) _ci_part=core ;;
+			esac
+			if [ -z "$_ci_effective" ]; then _ci_effective=$_ci_part; else _ci_effective=both; fi
+		done
+		FILES=$_ci_pending
+		if [ -z "$FILES" ]; then
+			ok "Всё уже установлено; обновление не требуется"
+			if [ "$DRY_RUN" -eq 1 ]; then emit "DRY_RUN|$INSTALL_SET"; else emit "CURRENT|$INSTALL_SET"; fi
+			return 0
+		fi
+		# Только обновление панели не должно перезапускать актуальное ядро.
+		[ "$DRY_RUN" -eq 1 ] || INSTALL_SET=$_ci_effective
 	fi
 
 	step "Проверка свободного места"
