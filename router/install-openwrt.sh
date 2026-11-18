@@ -13,7 +13,7 @@ case "${1:---menu}" in
     trap 'rm -f "$f"' EXIT
     wget -T 30 -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh || exit 1
     printf '%s  %s
-' '1d3006fac71ba6fdf5c12dd7234da6519c1acf6c1fad02f44805527d0b4163e3' "$f" | sha256sum -c - || exit 1
+' '145a9d24bfe2d2b7cfaf10f2ca9f16ba5f4f0f400aaf5e5cfef63d9d47d9f791' "$f" | sha256sum -c - || exit 1
     sh "$f" "$@"
     exit $?
     ;;

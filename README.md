@@ -19,11 +19,21 @@
 
 ## Роутер OpenWrt
 
-Выполните по SSH от root. В меню выберите панель, ядро или комплект.
+Выполните по SSH от root. В каждом меню можно выбрать панель, нужное ядро или комплект.
+
+**Новый комплект: панель CSQTT 2.5 и ядра 2.1.9 / 2.5.3.**
 
 ```sh
 wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
+
+**Предыдущий комплект: панель CSQTT 2.0 и ядра 2.1.9 / 2.5.1.**
+
+```sh
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-v2.0.sh | ash
+```
+
+[Инструкция 2.5](docs/v2.5/README.md) · [Инструкция 2.0](docs/v2.0/README.md).
 
 ## Сервер Linux / VPS
 
