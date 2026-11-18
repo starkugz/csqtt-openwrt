@@ -515,7 +515,7 @@ fetch() { # fetch URL OUT
 	return "$_fetch_rc"
 }
 
-release_url() {
+asset_download_url() {
 	case "$BASE_URL" in
 	https://github.com/*/releases/download/*) printf '%s/%s?csqtt=%s-%s\n' "$BASE_URL" "$1" "$(date +%s)" "$$" ;;
 	*) printf '%s/%s\n' "$BASE_URL" "$1" ;;
@@ -524,7 +524,7 @@ release_url() {
 
 fetch_manifest() {
 	[ -d "$WORK" ] || mkdir -p "$WORK"
-	if ! fetch "$(release_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
+	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
 		die "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть); изменения не вносились" "$EX_PREFLIGHT"
 	fi
 	[ -s "$WORK/SHA256SUMS" ] || die "SHA256SUMS пуст; выпуск неполный, изменения не вносились" "$EX_PREFLIGHT"
@@ -594,7 +594,7 @@ download_asset() { # download_asset "hash name" component
 	case "$_dl_name" in
 	*/* | "" | . | ..) die "недопустимое имя файла в SHA256SUMS: $_dl_name" "$EX_PREFLIGHT" ;;
 	esac
-	if ! fetch "$(release_url "$_dl_name")" "$WORK/$_dl_name"; then
+	if ! fetch "$(asset_download_url "$_dl_name")" "$WORK/$_dl_name"; then
 		if [ -n "$PIN_NAME" ]; then
 			emit "ARTIFACT_CHANGED|reason:unavailable|component:$INSTALL_SET|name:$_dl_name"
 			die "проверенный файл $_dl_name недоступен (404 или сеть); повторите проверку обновлений" "$EX_PREFLIGHT"
@@ -1319,7 +1319,7 @@ probe_core219() {
 	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) return 0 ;; esac
 	[ -n "$PKG_EXT" ] || return 0
 	mkdir -p "$WORK" 2>/dev/null || return 0
-	fetch "$(release_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
+	fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
 	[ -s "$WORK/SHA256SUMS" ] || return 0
 	CORE219_AVAILABLE=0
 	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
@@ -1513,7 +1513,7 @@ cmd_check() {
 	fi
 
 	mkdir -p "$WORK"
-	if ! fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS"; then
+	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
 		err "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть)"
 		emit "CHECK_FAILED|stage:manifest|reason:network_or_404"
 		exit "$EX_PREFLIGHT"
