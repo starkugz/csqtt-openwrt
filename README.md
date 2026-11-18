@@ -44,13 +44,13 @@ SHA-256 скачанных пакетов. Для OpenWrt 24.10.8 использ
 **Панель 2.5** из выпуска `v2.5.3`:
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/router/install-openwrt.sh && sh "$f" 2.5
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.5
 ```
 
 **Панель 2.0** из выпуска `v2.0`:
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/router/install-openwrt.sh && sh "$f" 2.0
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.0
 ```
 
 Добавьте `--dry-run` после номера версии, чтобы посмотреть план установки.
