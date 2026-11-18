@@ -106,7 +106,7 @@ install_router() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/41d2e78560b3e5fb9f3ca60b8b66fbcde691723a/router/install-csqtt.sh"
+    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/790cfc691525fcacc3f32fe191e9c761a6172120/router/install-csqtt.sh"
     printf '%s  %s\n' "$sha" "$work/install-csqtt.sh" | sha256sum -c -
 
     if [ "$#" -eq 0 ]; then
