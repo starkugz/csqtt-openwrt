@@ -489,15 +489,30 @@ require_release() {
 # --- сеть ------------------------------------------------------------------
 
 fetch() { # fetch URL OUT
+	_fetch_rc=1
 	if command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -O "$2" "$1"
-	elif command -v wget >/dev/null 2>&1; then
-		wget -q -O "$2" "$1"
-	elif command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1" -o "$2"
-	else
-		return 1
+		if uclient-fetch -T 15 -q -O "$2" "$1"; then
+			return 0
+		else
+			_fetch_rc=$?
+		fi
 	fi
+	if command -v wget >/dev/null 2>&1; then
+		if wget -T 30 -t 1 -q -O "$2" "$1"; then
+			return 0
+		else
+			_fetch_rc=$?
+		fi
+	fi
+	if command -v curl >/dev/null 2>&1; then
+		if curl -fsSL --connect-timeout 15 --max-time 90 "$1" -o "$2"; then
+			return 0
+		else
+			_fetch_rc=$?
+		fi
+	fi
+	rm -f "$2"
+	return "$_fetch_rc"
 }
 
 fetch_manifest() {
@@ -1289,7 +1304,7 @@ state_check() { # state_check SET
 # SHA256SUMS выпуска: без сети, без выпуска или без подходящего файла пункты
 # скрыты, а установка 2.5.3/панели остаётся доступной.
 probe_core219() {
-	CORE219_AVAILABLE=0
+	CORE219_AVAILABLE=-1
 	detect_pm_soft
 	detect_series
 	load_release >/dev/null 2>&1 || true
@@ -1299,6 +1314,7 @@ probe_core219() {
 	mkdir -p "$WORK" 2>/dev/null || return 0
 	fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
 	[ -s "$WORK/SHA256SUMS" ] || return 0
+	CORE219_AVAILABLE=0
 	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
 	escape_re csqtt-core-2.1.9
 	_c219=$(pick_asset "^${RE_ESC}[_-]${ARCH_RE}[.]${PKG_EXT}\$")
@@ -1314,8 +1330,17 @@ probe_core219() {
 
 menu_select() {
 	[ -t 0 ] || die "для --menu нужен TTY; без TTY укажите --set core|panel|both" "$EX_USAGE"
+	_menu_color=""
+	_menu_reset=""
+	if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
+		_menu_color=$(printf '\033[1;36m')
+		_menu_reset=$(printf '\033[0m')
+	fi
+	printf '\n%sCSQTT для OpenWrt%s\n' "$_menu_color" "$_menu_reset" >&2
+	printf 'Проверка доступных компонентов…\n' >&2
 	probe_core219
-	printf 'Выберите состав:\n' >&2
+	printf '%s · %s · %s\n\n' "${SERIES:-OpenWrt}" "${ARCH:-архитектура не определена}" "${PKG_EXT:-пакеты}" >&2
+	printf '%sВыберите состав:%s\n' "$_menu_color" "$_menu_reset" >&2
 	printf '  1) ядро 2.5.3 и панель\n' >&2
 	printf '  2) только ядро 2.5.3\n' >&2
 	printf '  3) только панель\n' >&2
@@ -1327,12 +1352,15 @@ menu_select() {
 	elif [ "$CORE219_AVAILABLE" -eq 0 ]; then
 		info "пункты ядра 2.1.9 скрыты: для ${SERIES:-этой линии}/${ARCH:-этой архитектуры} (${PKG_EXT:-формат}) в выпуске нет пакета"
 		_menu_del=4
+	else
+		warn "доступность ядра 2.1.9 не проверена: не удалось загрузить сведения выпуска. Проверьте доступ к GitHub и повторите запуск"
+		_menu_del=4
 	fi
 	case "$ACTION" in
 	install | update | uninstall) printf '  %s) удалить\n' "$_menu_del" >&2 ;;
 	esac
-	printf '  0) отмена\n' >&2
-	printf '> ' >&2
+	printf '\n  0) отмена\n\n' >&2
+	printf 'Ваш выбор > ' >&2
 	read -r _menu_ans || _menu_ans=""
 	case "$_menu_ans" in
 	0) exit 0 ;;
