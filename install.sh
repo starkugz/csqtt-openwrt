@@ -7,7 +7,7 @@ install_csqtt() (
     umask 077
     if [ -f /etc/openwrt_release ]; then
         installer=router/install.sh
-        sha=e61764d504c75f9b1f13fa104cd26bd9c9dce564f3b36a8c3b1523c3f60a3fbc
+        sha=8fdfe8ceeb6dc52f033d65badafd10efd08bb27a8fff0e280b8a14c027a266b2
         platform=OpenWrt
         [ "$#" -gt 0 ] || set -- install --menu
     else
