@@ -13,7 +13,7 @@ case "${1:---menu}" in
     trap 'rm -f "$f"' EXIT
     wget -T 30 -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh || exit 1
     printf '%s  %s
-' 'd5f874e2b943f5fa168f145e7241fbfcf3c4abaa786c540a2253afe28b924e0a' "$f" | sha256sum -c - || exit 1
+' '1d3006fac71ba6fdf5c12dd7234da6519c1acf6c1fad02f44805527d0b4163e3' "$f" | sha256sum -c - || exit 1
     sh "$f" "$@"
     exit $?
     ;;
@@ -78,14 +78,14 @@ cat >"$work/uclient-fetch" <<'SH'
 [ "$#" -eq 4 ] && [ "$1" = -q ] && [ "$2" = -O ] || exit 2
 out=$3
 url=$4
-if command -v wget >/dev/null 2>&1 && wget -q -O "$out" "$url" && [ -s "$out" ]; then
+if command -v wget >/dev/null 2>&1 && wget -T 30 -qO "$out" "$url" && [ -s "$out" ]; then
     exit 0
 fi
-if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$out" && [ -s "$out" ]; then
+if command -v curl >/dev/null 2>&1 && curl -fLsS --connect-timeout 15 --max-time 60 "$url" -o "$out" && [ -s "$out" ]; then
     exit 0
 fi
-if [ -n "$CSQTT_ORIGINAL_UCLIENT" ] &&
-    "$CSQTT_ORIGINAL_UCLIENT" -q -O "$out" "$url" && [ -s "$out" ]; then
+if [ -n "$CSQTT_ORIGINAL_UCLIENT" ] && command -v timeout >/dev/null 2>&1 &&
+    timeout 20 "$CSQTT_ORIGINAL_UCLIENT" -q -O "$out" "$url" && [ -s "$out" ]; then
     exit 0
 fi
 rm -f -- "$out"
