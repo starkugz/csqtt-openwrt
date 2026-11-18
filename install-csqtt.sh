@@ -1,108 +1,1873 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 amurcanov
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-set -eu
-umask 077
+#
+# [051] Установщик CSQTT для OpenWrt: единственное ядро 2.5.3 и отдельная
+# панель CSQTT 2.5. Панель и ядро обновляются независимо, профили,
+# секреты и device_id в /etc/config/csqtt сохраняются.
+#
+# Режимы (--set): core | panel | both. Действия: install, update, check,
+# inventory, status, verify, rollback, uninstall, help.
+#
+# [057] Основное ядро — 2.5.3. Ядро 2.1.9 ставится только по явному выбору
+# (--core-version 2.1.9 или пункт меню) и только когда в выпуске есть пакет
+# для точной линии OpenWrt и архитектуры; пункты меню 2.1.9 иначе скрыты.
+#
+# Конфигурация выпуска — единая: переменные CSQTT_RELEASE_OWNER,
+# CSQTT_RELEASE_REPO, CSQTT_RELEASE_TAG из окружения или файла
+# installer-release.conf рядом со скриптом. Если набор не задан полностью,
+# выпуск честно BLOCKED (код 60): URL не выдумывается.
+#
+# [063] Если owner/repo заданы, а тег пуст, точный тег последнего
+# опубликованного (не draft/prerelease) выпуска читается из GitHub API
+# (/releases/latest) и дальше используются только точные URL
+# /releases/download/<тег>/: строка "latest" как тег по-прежнему отвергается.
+# CSQTT_RELEASE_DISCOVER=0 отключает это чтение (тег обязан быть в конфиге).
+# CSQTT_RELEASE_BASE_URL — явное зеркало/локальный стенд для проверок.
+#
+# Менеджер пакетов определяется по факту: opkg => .ipk, apk => .apk.
+# Оба или ни одного — отказ без fallback. Архитектура берётся у менеджера
+# (opkg print-architecture / apk --print-arch), фиксированного списка нет.
+# Серия OpenWrt читается из /etc/openwrt_release: если в выпуске есть
+# имена с -openwrt-<серия>-, выбирается файл своей серии (так разведены
+# стабильный Filogic 25.12 и Snapshot с одинаковыми ABI и форматом).
+#
+# Ничего не запускает загруженные данные как код: пакеты проверяются по
+# SHA256SUMS из выпуска и передаются менеджеру пакетов.
+#
+# Коды возврата:
+#   0  успех / проверка пройдена
+#   2  ошибка аргументов или нужен --set/--yes
+#   20 ошибка до изменений (манифест, SHA, ABI, зависимости, место, выпуск)
+#   30 проверка после установки не прошла, прежнее состояние восстановлено
+#   31 восстановить/удалить не удалось — нужна ручная команда
+#   40 занято другим запуском
+#   60 выпуск BLOCKED: не заданы owner/repo/tag
+#
+# Локальные проверки: openwrt/tests/installer-051/run.sh (CSQTT_ROOT, mocks).
+set -u
 
-run_installer() {
-    CSQTT_RELEASE_OWNER=starkugz CSQTT_RELEASE_REPO=csqtt-openwrt \
-        CSQTT_RELEASE_TAG=v2.5.3 CSQTT_RELEASE_BASE_URL="$base" \
-        sh "$work/install-csqtt.sh" "$@"
-}
+CORE_VERSION=2.5.3
+CORE_PACKAGE=csqtt-core-2.5.3
+PANEL_PACKAGE=luci-app-csqtt
+CORE_BRANCH=""
 
-prepare_dependencies() {
-    case "${1:-}" in
-        install|update) shift ;;
-        *) return 0 ;;
-    esac
-    component=
-    assume_yes=0
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --set) [ "$#" -ge 2 ] || return 0; component=$2; shift ;;
-            --set=*) component=${1#--set=} ;;
-            --yes|-y) assume_yes=1 ;;
-            *) return 0 ;;
-        esac
-        shift
-    done
-    command -v apk >/dev/null 2>&1 || return 0
+EX_OK=0
+EX_USAGE=2
+EX_PREFLIGHT=20
+EX_RECOVERED=30
+EX_FAILED=31
+EX_BUSY=40
+EX_BLOCKED=60
 
-    set --
-    case "$component" in
-        core) set -- kmod-tun ;;
-        panel) set -- luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout ;;
-        both) set -- kmod-tun luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout ;;
-        *) return 0 ;;
-    esac
-    if [ "$component" != panel ] && grep -q '^mipsel' /etc/apk/arch 2>/dev/null; then
-        set -- "$@" libgcc1
-    fi
-    required="$*"
-    set --
-    for dep in $required; do
-        apk info -e "$dep" >/dev/null 2>&1 || set -- "$@" "$dep"
-    done
-    [ "$#" -gt 0 ] || return 0
-    run_installer check --set "$component"
-    if [ "$assume_yes" -eq 0 ]; then
-        printf 'Продолжить установку CSQTT? Будут добавлены зависимости OpenWrt (%s) [y/N] ' "$*" >&2
-        read -r answer || exit 1
-        case "$answer" in y|Y|yes|YES) ;; *) exit 0 ;; esac
-    fi
-    mkdir "$work/apk-cache"
-    apk --cache-dir "$work/apk-cache" update
-    LC_ALL=C apk --cache-dir "$work/apk-cache" add --simulate "$@" >"$work/apk-plan" 2>&1 || {
-        cat "$work/apk-plan" >&2
-        return 1
-    }
-    if grep -Ei 'upgrading|downgrading|purging|removing|replacing|reinstalling' "$work/apk-plan" >&2; then
-        printf 'Установка зависимостей требует изменения установленных пакетов OpenWrt.\n' >&2
-        return 1
-    fi
-    added_dependencies="$*"
-    apk --cache-dir "$work/apk-cache" add "$@"
+# Запас сверх установленного размера: временные файлы распаковки, права,
+# журналы. Не заменяет проверку памяти процесса ядра, только место на overlay.
+SPACE_RESERVE_KB=${CSQTT_SPACE_RESERVE_KB:-3072}
+case "$SPACE_RESERVE_KB" in '' | *[!0-9]*) SPACE_RESERVE_KB=3072 ;; esac
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ROOT=${CSQTT_ROOT:-}
+CONFIG="$ROOT/etc/config/csqtt"
+INITD="$ROOT/etc/init.d/csqtt"
+STATE_DIR=${CSQTT_INSTALLER_STATE_DIR:-$ROOT/etc/csqtt-installer}
+TMPBASE=${CSQTT_TMPDIR:-${ROOT:+$ROOT/tmp}}
+[ -n "$TMPBASE" ] || TMPBASE=/tmp
+WORK="$TMPBASE/csqtt-installer.$$"
+LOCK="$TMPBASE/csqtt-installer.lock"
+
+ACTION=""
+INSTALL_SET=""
+DRY_RUN=0
+ASSUME_YES=0
+PURGE=0
+MENU=0
+NO_RESTART=0
+BACKUP_ARG=""
+RELEASE_CONF="${CSQTT_INSTALLER_RELEASE_CONF:-$SCRIPT_DIR/installer-release.conf}"
+# [063/2] Привязка установки к завершённой проверке: панель передаёт точный
+# тег, имя файла, SHA-256 и версию, которые были показаны пользователю.
+# Пустые значения — обычный путь с выбором по манифесту.
+PIN_TAG=""
+PIN_NAME=""
+PIN_SHA256=""
+PIN_VERSION=""
+PLAN_FILE="${CSQTT_INSTALLER_PLAN_FILE:-}"
+
+SERIES=""
+SERIES_LINE=""
+PM=""
+PKG_EXT=""
+ARCH=""
+HAVE_OPKG=0
+HAVE_APK=0
+BASE_URL=""
+RELEASE_READY=0
+RELEASE_STATE=""
+API_JSON=""
+OWNER=""
+REPO=""
+TAG=""
+BACKUP=""
+CFG_SHA_BEFORE=""
+CFG_PRESENT_BEFORE=0
+LOCKED=0
+
+log() { printf '[+] %s\n' "$*"; }
+info() { printf '[i] %s\n' "$*"; }
+warn() { printf '[!] %s\n' "$*" >&2; }
+err() { printf '[x] %s\n' "$*" >&2; }
+step() { printf '\n== %s ==\n' "$*"; }
+ok() { printf '  OK   %s\n' "$*"; }
+emit() { printf 'CSQTT_INSTALLER_%s\n' "$*"; }
+
+die() {
+	err "$1"
+	emit "FAILED|$2|$1"
+	exit "$2"
 }
 
 cleanup() {
-    rc=$?
-    trap - EXIT
-    if [ "$rc" -ne 0 ] && [ -n "$added_dependencies" ]; then
-        # Only packages absent before this attempt may be removed.
-        set --
-        for dep in $added_dependencies; do
-            if apk info -e "$dep" >/dev/null 2>&1; then set -- "$@" "$dep"; fi
-        done
-        if [ "$#" -gt 0 ]; then
-            apk --no-network del "$@" ||
-                printf 'Не удалось удалить добавленные зависимости OpenWrt.\n' >&2
-        fi
-    fi
-    rm -rf -- "$work"
-    exit "$rc"
+	if [ "$LOCKED" -eq 1 ]; then
+		rmdir "$LOCK" 2>/dev/null || true
+	fi
+	rm -rf "$WORK"
+	rm -f "$TMPBASE/csqtt-release.$$.json" 2>/dev/null || true
+	rm -f "$TMPBASE/csqtt-notes.$$.json" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+usage() {
+	cat <<'EOF'
+Использование: install-csqtt.sh [ДЕЙСТВИЕ] [параметры]
+
+Действия:
+  install      установить выбранные компоненты (по умолчанию)
+  update       обновить выбранные уже установленные компоненты
+  check        только чтение: что опубликовано и подходит ли этой системе
+  inventory    только чтение: менеджер, arch, версии, конфигурация
+  status       состояние установленных компонентов (только чтение)
+  verify       проверить установленные компоненты (только чтение)
+  rollback     восстановить снимок файлов и /etc/config/csqtt
+  uninstall    удалить выбранные компоненты; конфигурация сохраняется
+  help         эта справка
+
+Параметры:
+  --set core|panel|both  состав операции (обязателен без --menu)
+  --core-version 2.1.9|2.5.3
+                         явно выбрать ветку ядра для check/install/update/
+                         uninstall (с --set core|both); для uninstall удаляется
+                         только выбранное ядро, без флага — оба
+  --menu                 интерактивный выбор состава (нужен TTY):
+                           1) ядро 2.5.3 и панель
+                           2) только ядро 2.5.3
+                           3) только панель
+                           4) ядро 2.1.9 и панель   — только если для этой
+                           5) только ядро 2.1.9        линии есть пакет
+                           6) удалить (для install/update/uninstall)
+  --yes, -y              не запрашивать подтверждение
+  --dry-run              проверить и показать план, ничего не менять
+  --purge                при uninstall удалить /etc/config/csqtt и состояние
+  --no-restart           не перезапускать службу после изменения
+  --release-conf PATH    файл конфигурации выпуска
+  --backup DIR           снимок для rollback (по умолчанию последний)
+  --help, -h             эта справка
+
+Привязка к проверке (install/update, один компонент):
+  --pin-tag TAG          точный тег проверенного выпуска (latest не бывает)
+  --pin-name FILE        имя проверенного пакета из SHA256SUMS
+  --pin-sha256 HEX       SHA-256 проверенного пакета
+  --pin-version VER      полная версия из метаданных проверенного пакета
+  Если файл исчез или SHA/версия изменились — установка отклоняется с
+  маркером ARTIFACT_CHANGED и просьбой повторить проверку.
+
+Конфигурация выпуска (окружение или installer-release.conf):
+  CSQTT_RELEASE_OWNER, CSQTT_RELEASE_REPO, CSQTT_RELEASE_TAG
+  CSQTT_RELEASE_BASE_URL — явное зеркало (иначе GitHub Releases)
+  CSQTT_RELEASE_API_BASE — API выпусков (по умолчанию https://api.github.com)
+  CSQTT_RELEASE_DISCOVER — 1 (по умолчанию): без тега взять последний
+                            опубликованный выпуск; 0 — только явный тег
+  CSQTT_INSTALLER_NOTES_FILE — куда сохранить JSON выпуска для заметок
+  CSQTT_INSTALLER_PLAN_FILE — куда сохранить результат проверки (план установки)
+  CSQTT_ROOT — корень OpenWrt (только для офлайн-проверок)
+  CSQTT_INSTALLER_STATE_DIR — каталог снимков состояния
+
+Без owner/repo/tag выпуск BLOCKED (код 60); URL не выдумывается, строка
+latest как тег не принимается. Оба менеджера пакетов или ни одного —
+отказ (код 20), без fallback. Панель и ядро обновляются независимо.
+EOF
 }
 
-install_router() {
-    base=${CSQTT_RELEASE_BASE_URL:-https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3}
-    sha=a12f467a1072da829619f38fe3094db090d7208ad57b9d211dbae0698f23495b
-    work=$(mktemp -d)
-    added_dependencies=
-    trap cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-
-    wget -O "$work/install-csqtt.sh" "$base/install-csqtt.sh"
-    printf '%s  %s\n' "$sha" "$work/install-csqtt.sh" | sha256sum -c -
-
-    if [ "$#" -eq 0 ]; then
-        set -- install --set both
-    fi
-    prepare_dependencies "$@"
-    if [ -n "$added_dependencies" ]; then
-        run_installer "$@" --yes
-    else
-        run_installer "$@"
-    fi
+parse_args() {
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		install | update | check | inventory | status | verify | rollback | uninstall | help)
+			ACTION="$1"
+			;;
+		remove) ACTION="uninstall" ;;
+		--set)
+			[ "$#" -ge 2 ] || die "для --set нужно core|panel|both" "$EX_USAGE"
+			INSTALL_SET="$2"
+			shift
+			;;
+		--set=*) INSTALL_SET=${1#--set=} ;;
+		--core-version)
+			[ "$#" -ge 2 ] || die "для --core-version нужна версия" "$EX_USAGE"
+			CORE_BRANCH="$2"
+			shift
+			;;
+		--yes | -y) ASSUME_YES=1 ;;
+		--dry-run) DRY_RUN=1 ;;
+		--purge) PURGE=1 ;;
+		--menu) MENU=1 ;;
+		--no-restart) NO_RESTART=1 ;;
+		--release-conf)
+			[ "$#" -ge 2 ] || die "для --release-conf нужен путь" "$EX_USAGE"
+			RELEASE_CONF="$2"
+			shift
+			;;
+		--release-conf=*) RELEASE_CONF=${1#--release-conf=} ;;
+		--backup)
+			[ "$#" -ge 2 ] || die "для --backup нужен каталог" "$EX_USAGE"
+			BACKUP_ARG="$2"
+			shift
+			;;
+		--backup=*) BACKUP_ARG=${1#--backup=} ;;
+		--pin-tag)
+			[ "$#" -ge 2 ] || die "для --pin-tag нужен тег" "$EX_USAGE"
+			PIN_TAG="$2"
+			shift
+			;;
+		--pin-tag=*) PIN_TAG=${1#--pin-tag=} ;;
+		--pin-name)
+			[ "$#" -ge 2 ] || die "для --pin-name нужно имя файла" "$EX_USAGE"
+			PIN_NAME="$2"
+			shift
+			;;
+		--pin-name=*) PIN_NAME=${1#--pin-name=} ;;
+		--pin-sha256)
+			[ "$#" -ge 2 ] || die "для --pin-sha256 нужен SHA-256" "$EX_USAGE"
+			PIN_SHA256="$2"
+			shift
+			;;
+		--pin-sha256=*) PIN_SHA256=${1#--pin-sha256=} ;;
+		--pin-version)
+			[ "$#" -ge 2 ] || die "для --pin-version нужна версия" "$EX_USAGE"
+			PIN_VERSION="$2"
+			shift
+			;;
+		--pin-version=*) PIN_VERSION=${1#--pin-version=} ;;
+		--help | -h) ACTION="help" ;;
+		*) die "неизвестный аргумент: $1 (см. --help)" "$EX_USAGE" ;;
+		esac
+		shift
+	done
+	[ -n "$ACTION" ] || ACTION="install"
 }
 
-install_router "$@"
+# --- менеджер пакетов и архитектура ---------------------------------------
+
+probe_pm() {
+	HAVE_OPKG=0
+	HAVE_APK=0
+	command -v opkg >/dev/null 2>&1 && HAVE_OPKG=1
+	command -v apk >/dev/null 2>&1 && HAVE_APK=1
+}
+
+opkg_arch() {
+	opkg print-architecture 2>/dev/null |
+		awk '$1=="arch" && $2!="all" && $2!="noarch" {print $2; exit}'
+}
+
+apk_arch() {
+	# [055/r10] Файлы выпуска названы архитектурой пакетов OpenWrt
+	# (aarch64_cortex-a53), а `apk --print-arch` отдаёт архитектуру CPU
+	# (aarch64). Совпадение по имени пакета требует первой.
+	if [ -r "$ROOT/etc/apk/arch" ]; then
+		awk 'NF{print $1; exit}' "$ROOT/etc/apk/arch"
+		return
+	fi
+	apk --print-arch 2>/dev/null | awk 'NF{print $1; exit}'
+}
+
+# Серия OpenWrt из /etc/openwrt_release: 24.10/25.12 (стабильные) или snapshot.
+# Нужна, чтобы Filogic 25.12 и Filogic Snapshot с одинаковыми ABI/форматом не
+# путались: оба пакета лежат в одном выпуске, различаясь сегментом
+# -openwrt-<серия>- в имени файла.
+detect_series() {
+	SERIES=""
+	[ -r "$ROOT/etc/openwrt_release" ] || return 0
+	SERIES=$(sed -n "s/^DISTRIB_RELEASE=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}\$/\1/p" \
+		"$ROOT/etc/openwrt_release" | head -n1)
+	case "$SERIES" in
+	*SNAPSHOT* | *snapshot*) SERIES=snapshot ;;
+	esac
+	case "$SERIES" in
+	'' | *[!0-9A-Za-z._-]*) SERIES="" ;;
+	esac
+	# Линия выпуска (25.12.5 -> 25.12): пакет той же линии подходит и после
+	# минорного обновления OpenWrt, пока ABI/формат совпадают.
+	SERIES_LINE=""
+	case "$SERIES" in
+	*.*) SERIES_LINE=${SERIES%.*} ;;
+	esac
+	[ -n "$SERIES" ] && info "серия OpenWrt: $SERIES"
+	return 0
+}
+
+detect_pm_soft() {
+	probe_pm
+	if [ "$HAVE_OPKG" -eq 1 ] && [ "$HAVE_APK" -eq 0 ]; then
+		PM="opkg"
+		PKG_EXT="ipk"
+		ARCH=$(opkg_arch)
+	elif [ "$HAVE_APK" -eq 1 ] && [ "$HAVE_OPKG" -eq 0 ]; then
+		PM="apk"
+		PKG_EXT="apk"
+		ARCH=$(apk_arch)
+	else
+		PM="none"
+		PKG_EXT=""
+		ARCH=""
+	fi
+}
+
+detect_pm() {
+	probe_pm
+	if [ "$HAVE_OPKG" -eq 1 ] && [ "$HAVE_APK" -eq 1 ]; then
+		die "найдены и opkg, и apk: формат выпуска неоднозначен, fallback запрещён" "$EX_PREFLIGHT"
+	fi
+	if [ "$HAVE_OPKG" -eq 0 ] && [ "$HAVE_APK" -eq 0 ]; then
+		die "не найден ни opkg, ни apk: это не OpenWrt или менеджер недоступен" "$EX_PREFLIGHT"
+	fi
+	if [ "$HAVE_OPKG" -eq 1 ]; then
+		PM="opkg"
+		PKG_EXT="ipk"
+		ARCH=$(opkg_arch)
+	else
+		PM="apk"
+		PKG_EXT="apk"
+		ARCH=$(apk_arch)
+	fi
+	[ -n "$ARCH" ] || die "не удалось определить архитектуру пакетов ($PM)" "$EX_PREFLIGHT"
+	case "$ARCH" in
+	*[!A-Za-z0-9_.-]*) die "некорректная архитектура пакетов: $ARCH" "$EX_PREFLIGHT" ;;
+	esac
+	info "менеджер пакетов: $PM (.$PKG_EXT), архитектура: $ARCH"
+}
+
+# --- конфигурация выпуска --------------------------------------------------
+
+release_url() {
+	[ -n "$BASE_URL" ] && return 0
+	[ -n "$OWNER" ] && [ -n "$REPO" ] && [ -n "$TAG" ] || return 1
+	BASE_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG"
+}
+
+# [063] Точный тег последнего опубликованного выпуска (не draft/prerelease).
+# API только читает; пакеты потом качаются по точному тегу, а не по latest.
+# DISCOVER_STATE: api_unreachable (сеть/API) | not_published (404/нет тега).
+discover_release_tag() {
+	DISCOVER_STATE=""
+	_dt_json="$TMPBASE/csqtt-release.$$.json"
+	mkdir -p "$TMPBASE" 2>/dev/null || true
+	fetch "${API_BASE}/repos/$OWNER/$REPO/releases/latest" "$_dt_json"
+	_dt_rc=$?
+	if [ "$_dt_rc" -ne 0 ]; then
+		# 404/HTTP-ошибка сервера: выпуска нет; иначе сеть/API недоступны.
+		# wget возвращает 8, curl — 22; тело 404 может содержать message.
+		_dt_body=""
+		[ -s "$_dt_json" ] && _dt_body=$(cat "$_dt_json" 2>/dev/null || true)
+		case "$_dt_rc" in
+		8 | 22) DISCOVER_STATE=not_published ;;
+		*)
+			case "$_dt_body" in
+			*'"Not Found"'* | *'"message"'*) DISCOVER_STATE=not_published ;;
+			*) DISCOVER_STATE=api_unreachable ;;
+			esac
+			;;
+		esac
+		rm -f "$_dt_json"
+		return 1
+	fi
+	if [ ! -s "$_dt_json" ]; then
+		rm -f "$_dt_json"
+		DISCOVER_STATE=not_published
+		return 1
+	fi
+	_dt_tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_dt_json" | head -n1)
+	case "$_dt_tag" in
+	'' | *[!A-Za-z0-9._/-]*)
+		rm -f "$_dt_json"
+		DISCOVER_STATE=not_published
+		return 1
+		;;
+	esac
+	TAG="$_dt_tag"
+	API_JSON="$_dt_json"
+	return 0
+}
+
+load_release() {
+	if [ -f "$RELEASE_CONF" ]; then
+		# shellcheck disable=SC1090
+		. "$RELEASE_CONF"
+		info "конфигурация выпуска: $RELEASE_CONF"
+	fi
+	OWNER=${CSQTT_RELEASE_OWNER:-}
+	REPO=${CSQTT_RELEASE_REPO:-}
+	TAG=${CSQTT_RELEASE_TAG:-}
+	BASE_URL=${CSQTT_RELEASE_BASE_URL:-}
+	API_BASE=${CSQTT_RELEASE_API_BASE:-https://api.github.com}
+	RELEASE_READY=0
+	RELEASE_STATE=""
+	# [063/2] Установка привязана к проверенному выпуску: /releases/latest не
+	# запрашивается, тег берётся ровно из подтверждения. Так смена latest между
+	# проверкой и установкой не подменяет выбранную версию.
+	if [ -n "$PIN_TAG" ]; then
+		TAG="$PIN_TAG"
+		if [ -n "$BASE_URL" ]; then
+			RELEASE_READY=1
+			RELEASE_STATE=ok
+			return 0
+		fi
+		[ -n "$OWNER" ] && [ -n "$REPO" ] || return 0
+		if release_url; then
+			RELEASE_READY=1
+			RELEASE_STATE=ok
+		fi
+		return 0
+	fi
+	[ -n "$TAG" ] && [ "$TAG" = "latest" ] && {
+		TAG=""
+		warn "tag=latest не запрашивается: укажите точный тег выпуска"
+	}
+	if [ -n "$BASE_URL" ]; then
+		RELEASE_READY=1
+		RELEASE_STATE=ok
+		return 0
+	fi
+	[ -n "$OWNER" ] && [ -n "$REPO" ] || return 0
+	if [ -z "$TAG" ] && [ "${CSQTT_RELEASE_DISCOVER:-1}" != "0" ]; then
+		if discover_release_tag; then
+			info "опубликованный выпуск: $TAG (GitHub API)"
+		else
+			RELEASE_STATE=$DISCOVER_STATE
+		fi
+	fi
+	if [ -n "$TAG" ]; then
+		release_url || true
+		RELEASE_READY=1
+		RELEASE_STATE=ok
+	fi
+	return 0
+}
+
+require_release() {
+	load_release
+	if [ "$RELEASE_READY" -eq 1 ]; then
+		info "выпуск: ${BASE_URL}"
+		return 0
+	fi
+	case "$RELEASE_STATE" in
+	not_published)
+		err "опубликованный выпуск не найден: ${OWNER:--}/${REPO:--} (GitHub Releases)"
+		emit "RELEASE_NOT_PUBLISHED|owner:${OWNER:--}|repo:${REPO:--}"
+		exit "$EX_BLOCKED"
+		;;
+	api_unreachable)
+		err "не удалось проверить выпуски ${OWNER:--}/${REPO:--}: GitHub API недоступен (сеть/прокси)"
+		emit "CHECK_FAILED|stage:release_api|reason:network"
+		exit "$EX_PREFLIGHT"
+		;;
+	esac
+	err "релиз BLOCKED: не заданы owner/repo/tag (окружение или $RELEASE_CONF)"
+	err "укажите CSQTT_RELEASE_OWNER, CSQTT_RELEASE_REPO, CSQTT_RELEASE_TAG; URL не выдумывается"
+	emit "RELEASE_BLOCKED|owner:${OWNER:--}|repo:${REPO:--}|tag:${TAG:--}"
+	exit "$EX_BLOCKED"
+}
+
+# --- сеть ------------------------------------------------------------------
+
+fetch() { # fetch URL OUT
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$2" "$1"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -O "$2" "$1"
+	elif command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$1" -o "$2"
+	else
+		return 1
+	fi
+}
+
+fetch_manifest() {
+	[ -d "$WORK" ] || mkdir -p "$WORK"
+	if ! fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS"; then
+		die "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть); изменения не вносились" "$EX_PREFLIGHT"
+	fi
+	[ -s "$WORK/SHA256SUMS" ] || die "SHA256SUMS пуст; выпуск неполный, изменения не вносились" "$EX_PREFLIGHT"
+}
+
+escape_re() { # escape_re STRING -> RE_ESC (достаточно точек для имён пакетов/arch)
+	RE_ESC=$(printf '%s' "$1" | sed 's/[.]/[.]/g')
+}
+
+pick_asset() { # pick_asset REGEX -> "hash name" | AMBIGUOUS
+	awk -v pat="$1" -v ser="$SERIES" -v line="$SERIES_LINE" '
+		NF >= 2 {
+			name = $2
+			sub(/^\*/, "", name)
+			sub(/^\.\//, "", name)
+			if (name !~ pat) next
+			if (ser != "" && index(name, "-openwrt-" ser "-") > 0) {
+				exact = $1 " " name
+				nexact++
+				next
+			}
+			if (line != "" && index(name, "-openwrt-" line ".") > 0) {
+				lmatch = $1 " " name
+				nline++
+				next
+			}
+			# A package explicitly named for another OpenWrt line is not generic.
+			if (ser != "" && index(name, "-openwrt-") > 0) next
+			gen = $1 " " name
+			ngen++
+		}
+		END {
+			if (nexact == 1) { print exact; exit 0 }
+			if (nexact > 1) { print "AMBIGUOUS"; exit 0 }
+			if (nline == 1) { print lmatch; exit 0 }
+			if (nline > 1) { print "AMBIGUOUS"; exit 0 }
+			if (ngen == 1) { print gen; exit 0 }
+			if (ngen > 1) { print "AMBIGUOUS"; exit 0 }
+		}' "$WORK/SHA256SUMS"
+}
+
+select_core() {
+	escape_re "$CORE_PACKAGE"
+	_core_re=$RE_ESC
+	_core_short=$(pick_asset "^${_core_re}[_-]${ARCH_RE}[.]${PKG_EXT}\$")
+	[ -n "$_core_short" ] || _core_short=$(pick_asset "^${_core_re}[_-].*[_-]${ARCH_RE}[.]${PKG_EXT}\$")
+	if [ "$_core_short" = "AMBIGUOUS" ]; then
+		die "в SHA256SUMS несколько ядер для $ARCH (.$PKG_EXT, серия ${SERIES:-не определена}); укажите BASE_URL нужной серии или выпуск с уникальными именами" "$EX_PREFLIGHT"
+	fi
+	SELECTED_CORE="$_core_short"
+}
+
+select_panel() {
+	escape_re "$PANEL_PACKAGE"
+	_panel_re=$RE_ESC
+	_panel=$(pick_asset "^${_panel_re}[_-]all[.]${PKG_EXT}\$")
+	[ -n "$_panel" ] || _panel=$(pick_asset "^${_panel_re}[_-].*[_-]all[.]${PKG_EXT}\$")
+	if [ "$_panel" = "AMBIGUOUS" ]; then
+		die "в SHA256SUMS несколько панелей (.$PKG_EXT, серия ${SERIES:-не определена}); укажите BASE_URL нужной серии или выпуск с уникальными именами" "$EX_PREFLIGHT"
+	fi
+	SELECTED_PANEL="$_panel"
+}
+
+download_asset() { # download_asset "hash name" component
+	_dl_hash=${1%% *}
+	_dl_name=${1#* }
+	case "$_dl_name" in
+	*/* | "" | . | ..) die "недопустимое имя файла в SHA256SUMS: $_dl_name" "$EX_PREFLIGHT" ;;
+	esac
+	if ! fetch "$BASE_URL/$_dl_name" "$WORK/$_dl_name"; then
+		if [ -n "$PIN_NAME" ]; then
+			emit "ARTIFACT_CHANGED|reason:unavailable|component:$INSTALL_SET|name:$_dl_name"
+			die "проверенный файл $_dl_name недоступен (404 или сеть); повторите проверку обновлений" "$EX_PREFLIGHT"
+		fi
+		die "не удалось скачать $_dl_name (404 или сеть); изменения не вносились" "$EX_PREFLIGHT"
+	fi
+	if [ ! -s "$WORK/$_dl_name" ]; then
+		if [ -n "$PIN_NAME" ]; then
+			emit "ARTIFACT_CHANGED|reason:empty|component:$INSTALL_SET|name:$_dl_name"
+			die "проверенный файл $_dl_name пуст; повторите проверку обновлений" "$EX_PREFLIGHT"
+		fi
+		die "файл $_dl_name пуст; изменения не вносились" "$EX_PREFLIGHT"
+	fi
+	_dl_got=$(sha256sum "$WORK/$_dl_name" | awk '{print $1}')
+	if [ "$_dl_got" != "$_dl_hash" ]; then
+		if [ -n "$PIN_NAME" ]; then
+			emit "ARTIFACT_CHANGED|reason:sha256|component:$INSTALL_SET|name:$_dl_name|expected:$_dl_hash|got:$_dl_got"
+			die "SHA-256 проверенного файла $_dl_name изменился; повторите проверку обновлений" "$EX_PREFLIGHT"
+		fi
+		die "SHA-256 не совпадает для $_dl_name (повреждённый или обрезанный файл); изменения не вносились" "$EX_PREFLIGHT"
+	fi
+	ok "$2: $_dl_name (SHA-256 совпал)"
+}
+
+# --- привязка к результату проверки ---------------------------------------
+
+# SHA-256 конкретного имени из манифеста выпуска (пусто — файла нет).
+manifest_sha_of() {
+	awk -v n="$1" 'NF >= 2 {
+		name = $2
+		sub(/^\*/, "", name)
+		sub(/^\.\//, "", name)
+		if (name == n) { print $1; exit }
+	}' "$WORK/SHA256SUMS"
+}
+
+# Проверка argv привязки. Все четыре значения обязательны вместе и должны
+# соответствовать выбранному компоненту: иначе это не подтверждение панели.
+validate_pins() {
+	[ -n "$PIN_TAG$PIN_NAME$PIN_SHA256$PIN_VERSION" ] || return 0
+	[ -n "$PIN_TAG" ] && [ -n "$PIN_NAME" ] && [ -n "$PIN_SHA256" ] && [ -n "$PIN_VERSION" ] ||
+		die "--pin-tag/--pin-name/--pin-sha256/--pin-version задаются вместе" "$EX_USAGE"
+	case "$PIN_TAG" in
+	'' | *[!A-Za-z0-9._/-]*) die "некорректный --pin-tag: $PIN_TAG" "$EX_USAGE" ;;
+	esac
+	case "$PIN_SHA256" in
+	*[!0-9a-f]*) die "некорректный --pin-sha256 (нужен lowercase hex)" "$EX_USAGE" ;;
+	esac
+	[ "${#PIN_SHA256}" -eq 64 ] || die "некорректный --pin-sha256 (нужно 64 символа)" "$EX_USAGE"
+	case "$PIN_VERSION" in
+	'' | *[!A-Za-z0-9._+~:-]*) die "некорректный --pin-version: $PIN_VERSION" "$EX_USAGE" ;;
+	esac
+	case "$PIN_NAME" in
+	'' | */* | . | ..) die "некорректный --pin-name: $PIN_NAME" "$EX_USAGE" ;;
+	esac
+	case "$INSTALL_SET" in
+	core)
+		case "$PIN_NAME" in
+		"${CORE_PACKAGE}"[_-]*"${ARCH}.${PKG_EXT}") ;;
+		*) die "--pin-name не является ядром $CORE_PACKAGE для $ARCH (.$PKG_EXT): $PIN_NAME" "$EX_USAGE" ;;
+		esac
+		;;
+	panel)
+		case "$PIN_NAME" in
+		"${PANEL_PACKAGE}"[_-]*[_-]"all.${PKG_EXT}") ;;
+		*) die "--pin-name не является панелью $PANEL_PACKAGE (all, .$PKG_EXT): $PIN_NAME" "$EX_USAGE" ;;
+		esac
+		;;
+	*)
+		die "--pin-* допустимы только с --set core|panel" "$EX_USAGE"
+		;;
+	esac
+}
+
+# Выбранный файл обязан совпадать с проверенным по имени и SHA-256. Отличия —
+# это не сетевая ошибка и не «нет пакета»: выпуск изменился, нужна новая
+# проверка (маркер ARTIFACT_CHANGED).
+pin_asset() { # pin_asset LABEL
+	_pa_sha=$(manifest_sha_of "$PIN_NAME")
+	if [ -z "$_pa_sha" ]; then
+		emit "ARTIFACT_CHANGED|reason:missing|component:$INSTALL_SET|name:$PIN_NAME"
+		die "проверенный файл $1 ($PIN_NAME) исчез из выпуска; повторите проверку обновлений" "$EX_PREFLIGHT"
+	fi
+	if [ "$_pa_sha" != "$PIN_SHA256" ]; then
+		emit "ARTIFACT_CHANGED|reason:sha256|component:$INSTALL_SET|name:$PIN_NAME|expected:$PIN_SHA256|got:$_pa_sha"
+		die "SHA-256 проверенного файла $1 изменился; повторите проверку обновлений" "$EX_PREFLIGHT"
+	fi
+	PIN_ASSET="$_pa_sha $PIN_NAME"
+}
+
+# Версия внутри скачанного пакета должна совпасть с показанной пользователю.
+verify_pinned_pkg() { # verify_pinned_pkg NAME
+	[ -n "$PIN_VERSION" ] || return 0
+	_vp_ver=$(pkg_version_of_file "$WORK/$1")
+	if [ "$_vp_ver" != "$PIN_VERSION" ]; then
+		emit "ARTIFACT_CHANGED|reason:version|component:$INSTALL_SET|name:$1|expected:$PIN_VERSION|got:${_vp_ver:--}"
+		die "версия проверенного пакета $1 ($_vp_ver) не совпадает с подтверждённой ($PIN_VERSION); повторите проверку обновлений" "$EX_PREFLIGHT"
+	fi
+}
+
+# --- проверка выпуска без изменений (check) --------------------------------
+
+# Полная пакетная версия из метаданных скачанного файла (ipk -> control,
+# apk -> adbdump). Проверенный по SHA файл читается локально, код не
+# исполняется. Пусто — версия не определена (формат/утилита недоступны).
+pkg_version_of_file() {
+	_pv_file=$1
+	_pv=""
+	if [ "$PKG_EXT" = "apk" ]; then
+		if command -v apk >/dev/null 2>&1; then
+			_pv=$(apk adbdump --allow-untrusted "$_pv_file" 2>/dev/null |
+				sed -n 's/^[[:space:]]*version:[[:space:]]*//p' | head -n1)
+			[ -n "$_pv" ] || _pv=$(apk adbdump "$_pv_file" 2>/dev/null |
+				sed -n 's/^[[:space:]]*version:[[:space:]]*//p' | head -n1)
+		fi
+	else
+		_pv=$(tar -xzOf "$_pv_file" ./control.tar.gz 2>/dev/null |
+			tar -xzOf - ./control 2>/dev/null |
+			sed -n 's/^Version:[[:space:]]*//p' | head -n1)
+		[ -n "$_pv" ] || _pv=$(tar -xzOf "$_pv_file" ./control.tar.gz 2>/dev/null |
+			tar -xzOf - control 2>/dev/null |
+			sed -n 's/^Version:[[:space:]]*//p' | head -n1)
+		if [ -z "$_pv" ] && command -v ar >/dev/null 2>&1; then
+			_pv=$(ar p "$_pv_file" control.tar.gz 2>/dev/null |
+				tar -xzOf - ./control 2>/dev/null |
+				sed -n 's/^Version:[[:space:]]*//p' | head -n1)
+		fi
+	fi
+	# Маркеры выпуска разделены `|`: версия с таким символом недопустима.
+	case "$_pv" in
+	*[!A-Za-z0-9._+~:-]*) _pv="" ;;
+	esac
+	printf '%s' "$_pv"
+}
+
+# Сравнение полных пакетных версий (2.5.3-r1, 2.5-r4): основа по числовым
+# компонентам, затем ревизия -rN. Печатает 1 (A новее), 0 (равны), -1 (старее).
+ver_cmp() {
+	awk -v a="$1" -v b="$2" '
+	function norm(s, out,   n, i, p) {
+		n = split(s, p, /[._+~:-]/);
+		out = 0;
+		for (i = 1; i <= 4; i++)
+			out = out * 100000 + (p[i] ~ /^[0-9]+$/ ? p[i] + 0 : 0);
+		return out;
+	}
+	BEGIN {
+		sa = split(a, ra, "-r");
+		sb = split(b, rb, "-r");
+		ba = norm(ra[1]);
+		bb = norm(rb[1]);
+		if (ba != bb) { print (ba > bb ? 1 : -1); exit }
+		na = (sa > 1 && ra[2] ~ /^[0-9]+$/) ? ra[2] + 0 : 0;
+		nb = (sb > 1 && rb[2] ~ /^[0-9]+$/) ? rb[2] + 0 : 0;
+		if (na != nb) { print (na > nb ? 1 : -1); exit }
+		print 0;
+	}'
+}
+
+# Скачивание asset'а для проверки: та же проверка SHA/пустоты, что и при
+# установке, но без die — причина уходит в CHECK_ERR для отдельного маркера.
+check_download() { # "hash name" -> 0; CHECK_ERR/CHECK_ERR_NAME
+	CHECK_ERR=""
+	CHECK_ERR_NAME=""
+	_cd_hash=${1%% *}
+	_cd_name=${1#* }
+	case "$_cd_name" in
+	*/* | "" | . | ..)
+		CHECK_ERR=name
+		CHECK_ERR_NAME="$_cd_name"
+		return 1
+		;;
+	esac
+	if ! fetch "$BASE_URL/$_cd_name" "$WORK/$_cd_name"; then
+		CHECK_ERR=download
+		CHECK_ERR_NAME="$_cd_name"
+		return 1
+	fi
+	if [ ! -s "$WORK/$_cd_name" ]; then
+		CHECK_ERR=empty
+		CHECK_ERR_NAME="$_cd_name"
+		return 1
+	fi
+	_cd_got=$(sha256sum "$WORK/$_cd_name" | awk '{print $1}')
+	if [ "$_cd_got" != "$_cd_hash" ]; then
+		CHECK_ERR=sha
+		CHECK_ERR_NAME="$_cd_name"
+		return 1
+	fi
+	return 0
+}
+
+# Результат проверки для панели: точный тег и по каждому проверенному
+# компоненту имя/SHA-256/версия. Пишется только при успешной проверке
+# (_check_bad=0) и только в разрешённом виде: значения ограничены наборами
+# символов, чтобы JSON нельзя было сломать именем из манифеста.
+write_plan() {
+	[ -n "$PLAN_FILE" ] || return 0
+	_wp_now=$(date +%s 2>/dev/null || true)
+	case "$_wp_now" in '' | *[!0-9]*) _wp_now=0 ;; esac
+	_wp_tag=$TAG
+	case "$_wp_tag" in *[!A-Za-z0-9._/-]*) _wp_tag="" ;; esac
+	_wp_dir=$(dirname "$PLAN_FILE" 2>/dev/null || printf '.')
+	mkdir -p "$_wp_dir" 2>/dev/null || true
+	_wp_tmp="$PLAN_FILE.tmp.$$"
+	if ! printf '{"tag":"%s","checked":%s,"components":{%s}}\n' \
+		"$_wp_tag" "$_wp_now" "${_plan_parts#,}" >"$_wp_tmp" 2>/dev/null; then
+		rm -f "$_wp_tmp" 2>/dev/null || true
+		warn "не удалось сохранить результат проверки: $PLAN_FILE"
+		return 0
+	fi
+	chmod 0644 "$_wp_tmp" 2>/dev/null || true
+	mv -f "$_wp_tmp" "$PLAN_FILE" 2>/dev/null || {
+		rm -f "$_wp_tmp" 2>/dev/null || true
+		warn "не удалось сохранить результат проверки: $PLAN_FILE"
+	}
+	return 0
+}
+
+# --- состояние пакетов -----------------------------------------------------
+
+installed_version_of() {
+	_iv_pkg=$1
+	if [ "$PM" = "apk" ]; then
+		apk list --installed 2>/dev/null |
+			sed -n "s/^${_iv_pkg}-\([0-9][^ ]*\) .*/\1/p" | head -n1
+	else
+		opkg list-installed 2>/dev/null |
+			sed -n "s/^${_iv_pkg} - \([0-9][^ ]*\).*/\1/p" | head -n1
+	fi
+}
+
+dep_ok() {
+	if [ "$PM" = "apk" ]; then
+		apk info -e "$1" >/dev/null 2>&1
+	else
+		opkg list-installed 2>/dev/null | grep -q "^$1 - "
+	fi
+}
+
+pkg_files() {
+	if [ "$PM" = "apk" ]; then
+		apk info -L "$1" 2>/dev/null
+	else
+		opkg files "$1" 2>/dev/null
+	fi
+}
+
+# Локальные пакеты уже скачаны и проверены по SHA256, сеть здесь не нужна.
+# Без --no-network apk открывает индексы репозиториев (wget на
+# downloads.openwrt.org) и при перехваченном/недоступном WAN висит без
+# ограничения времени: живая транзакция 055 встала именно на этом. С
+# --no-network зависимости разрешаются из установленной базы, а реально
+# отсутствующая зависимость даёт быстрый отказ вместо зависания.
+pm_dry_run() {
+	if [ "$PM" = "apk" ]; then
+		apk --no-network --allow-untrusted --force-non-repository add --simulate "$@" >/dev/null 2>&1
+	else
+		opkg install --noaction "$@" >/dev/null 2>&1
+	fi
+}
+
+pm_install() {
+	if [ "$PM" = "apk" ]; then
+		apk --no-network --allow-untrusted --force-non-repository add "$@"
+	else
+		opkg install --force-downgrade --force-reinstall "$@"
+	fi
+}
+
+pm_remove() {
+	if [ "$PM" = "apk" ]; then
+		apk del "$1"
+	else
+		opkg remove "$1"
+	fi
+}
+
+pm_dry_run_selected() {
+	set --
+	for _pds_f in $FILES; do
+		set -- "$@" "$WORK/$_pds_f"
+	done
+	pm_dry_run "$@"
+}
+
+pm_install_selected() {
+	set --
+	for _pis_f in $FILES; do
+		set -- "$@" "$WORK/$_pis_f"
+	done
+	pm_install "$@"
+}
+
+# --- проверка свободного места --------------------------------------------
+
+# Установленный размер пакета в КиБ. Точное значение берётся из метаданных:
+# ipk -> control.tar.gz/Installed-Size (байты), apk -> `apk adbdump` /
+# installed-size. Если метаданные недоступны (старый формат, локальный
+# mock), консервативно считаем 3× сжатого файла.
+pkg_installed_kb() {
+	_pik_f=$1
+	[ -f "$_pik_f" ] || { printf '0'; return 0; }
+	_pik_b=""
+	if [ "$PKG_EXT" = "apk" ]; then
+		_pik_b=$(apk adbdump "$_pik_f" 2>/dev/null |
+			sed -n 's/^[[:space:]]*installed-size:[[:space:]]*//p' | head -n1)
+	else
+		_pik_b=$(tar -xzOf "$_pik_f" ./control.tar.gz 2>/dev/null |
+			tar -xzOf - ./control 2>/dev/null |
+			sed -n 's/^Installed-Size:[[:space:]]*//p' | head -n1)
+		[ -n "$_pik_b" ] || _pik_b=$(tar -xzOf "$_pik_f" ./control.tar.gz 2>/dev/null |
+			tar -xzOf - control 2>/dev/null |
+			sed -n 's/^Installed-Size:[[:space:]]*//p' | head -n1)
+		# Старый ar-контейнер ipk (не формат OpenWrt 24.10, но встречается).
+		if [ -z "$_pik_b" ] && command -v ar >/dev/null 2>&1; then
+			_pik_b=$(ar p "$_pik_f" control.tar.gz 2>/dev/null |
+				tar -xzOf - ./control 2>/dev/null |
+				sed -n 's/^Installed-Size:[[:space:]]*//p' | head -n1)
+		fi
+	fi
+	case "$_pik_b" in
+	"" | *[!0-9]*)
+		_pik_bytes=$(wc -c <"$_pik_f" 2>/dev/null || printf '0')
+		case "$_pik_bytes" in '' | *[!0-9]*) _pik_bytes=0 ;; esac
+		printf '%s' $(( (_pik_bytes * 3 + 1023) / 1024 ))
+		;;
+	*) printf '%s' $(( (_pik_b + 1023) / 1024 )) ;;
+	esac
+}
+
+# Свободное место установки: overlay, иначе корень. Пусто — df недоступен.
+avail_kb() {
+	_ak_target=${CSQTT_SPACE_TARGET:-$ROOT/overlay}
+	[ -d "$_ak_target" ] || _ak_target=/
+	_ak_kb=$(df -Pk "$_ak_target" 2>/dev/null | awk 'NR==2 { print $4 }')
+	case "$_ak_kb" in
+	"" | *[!0-9]*) _ak_kb=$(df -k "$_ak_target" 2>/dev/null | awk 'NR==2 { print $4 }') ;;
+	esac
+	case "$_ak_kb" in
+	"" | *[!0-9]*) printf '' ;;
+	*) printf '%s' "$_ak_kb" ;;
+	esac
+}
+
+# Проверка до установки: на MT7621 с малым /overlay ядро 2.5.3 (~23 МиБ
+# installed) не помещается. Отказ понятный и без частичных изменений.
+space_preflight() {
+	_sp_need=0
+	for _sp_name in $FILES; do
+		_sp_size=$(pkg_installed_kb "$WORK/$_sp_name")
+		case "$_sp_size" in '' | *[!0-9]*) _sp_size=0 ;; esac
+		_sp_need=$((_sp_need + _sp_size))
+	done
+	# При обновлении старая копия ещё занимает overlay, пока файлы не
+	# заменены: резервируем место под старую и новую копии.
+	[ "$_ci_mode" = "update" ] && _sp_need=$((_sp_need * 2))
+	_sp_need=$((_sp_need + SPACE_RESERVE_KB))
+	_sp_avail=$(avail_kb)
+	if [ -z "$_sp_avail" ]; then
+		warn "не удалось определить свободное место; проверка места пропущена"
+		return 0
+	fi
+	if [ "$_sp_avail" -lt "$_sp_need" ]; then
+		die "недостаточно места в /overlay для $INSTALL_SET: нужно около $(( (_sp_need + 1023) / 1024 )) МиБ, свободно $(( _sp_avail / 1024 )) МиБ; освободите место и повторите. Изменения не вносились." "$EX_PREFLIGHT"
+	fi
+	ok "места достаточно: нужно около $(( (_sp_need + 1023) / 1024 )) МиБ, свободно $(( _sp_avail / 1024 )) МиБ"
+}
+
+config_sha() {
+	[ -f "$CONFIG" ] || {
+		printf '%s' "-"
+		return 0
+	}
+	sha256sum "$CONFIG" | awk '{print $1}'
+}
+
+service_enabled() {
+	for _se_f in "$ROOT"/etc/rc.d/S*csqtt; do
+		[ -e "$_se_f" ] || [ -L "$_se_f" ] || continue
+		return 0
+	done
+	return 1
+}
+
+# Запущена ли служба сейчас. Нужно снимку: откат обязан вернуть не только файлы,
+# но и работающий движок (иначе после неудачной установки служба остаётся
+# остановленной, как её остановил postinst нового ядра). В офлайн-корне и там,
+# где ubus недоступен, ответ — «нет»: перезапускать нечего.
+service_running() {
+	[ -n "$ROOT" ] && return 1
+	command -v ubus >/dev/null 2>&1 || return 1
+	ubus -t 2 call service list '{"name":"csqtt"}' 2>/dev/null | grep -q '"running": true'
+}
+
+restart_service() {
+	[ "$NO_RESTART" -eq 1 ] && {
+		info "перезапуск службы пропущен (--no-restart)"
+		return 0
+	}
+	if [ -x "$INITD" ]; then
+		if "$INITD" restart >/dev/null 2>&1; then
+			ok "служба перезапущена"
+		else
+			warn "служба не перезапустилась; проверьте вручную: $INITD restart"
+		fi
+	else
+		info "init-скрипт отсутствует: перезапуск не требуется"
+	fi
+}
+
+stop_service() {
+	[ "$NO_RESTART" -eq 1 ] && return 0
+	[ -x "$INITD" ] || return 0
+	"$INITD" stop >/dev/null 2>&1 || true
+}
+
+# --- снимки и откат --------------------------------------------------------
+
+ensure_state() {
+	mkdir -p "$STATE_DIR/backups"
+	chmod 0700 "$STATE_DIR" "$STATE_DIR/backups" 2>/dev/null || true
+}
+
+take_lock() {
+	[ "$LOCKED" -eq 1 ] && return 0
+	mkdir -p "$TMPBASE"
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		die "другой запуск установщика уже выполняется ($LOCK)" "$EX_BUSY"
+	fi
+	LOCKED=1
+}
+
+copy_pkg_files() { # copy_pkg_files PKG DIR
+	_cpf_pkg=$1
+	_cpf_dir=$2
+	_cpf_root=${ROOT%/}
+	[ -n "$_cpf_root" ] || _cpf_root=""
+	mkdir -p "$_cpf_dir"
+	: >"$_cpf_dir/files.list"
+	pkg_files "$_cpf_pkg" | while IFS= read -r _cpf_f; do
+		[ -n "$_cpf_f" ] || continue
+		case "$_cpf_f" in
+		/*) ;;
+		*) continue ;;
+		esac
+		[ -f "$_cpf_root$_cpf_f" ] || [ -L "$_cpf_root$_cpf_f" ] || continue
+		_cpf_dst="$_cpf_dir/files$_cpf_f"
+		mkdir -p "$(dirname "$_cpf_dst")"
+		cp -pP "$_cpf_root$_cpf_f" "$_cpf_dst" 2>/dev/null || return 1
+		printf '%s\n' "$_cpf_f" >>"$_cpf_dir/files.list"
+	done
+}
+
+make_backup() { # make_backup ACTION -> dir
+	_mb_action=$1
+	_mb_ts=$(date '+%Y%m%d-%H%M%S')
+	_mb_dir="$STATE_DIR/backups/${_mb_ts}-${_mb_action}-$$"
+	mkdir -p "$_mb_dir/files"
+	chmod 0700 "$_mb_dir" 2>/dev/null || true
+	printf '%s\n' "$_mb_ts" >"$_mb_dir/timestamp"
+	printf '%s\n' "$_mb_action" >"$_mb_dir/action"
+	printf '%s\n' "$PM" >"$_mb_dir/pm"
+	printf '%s\n' "$PKG_EXT" >"$_mb_dir/pkg_ext"
+	printf '%s\n' "$ARCH" >"$_mb_dir/arch"
+	printf '%s\n' "$CORE_PACKAGE" >"$_mb_dir/core_package"
+	installed_version_of "$CORE_PACKAGE" >"$_mb_dir/core_version"
+	installed_version_of "$PANEL_PACKAGE" >"$_mb_dir/panel_version"
+	[ -n "$(cat "$_mb_dir/core_version")" ] && echo yes >"$_mb_dir/core_present" || echo no >"$_mb_dir/core_present"
+	[ -n "$(cat "$_mb_dir/panel_version")" ] && echo yes >"$_mb_dir/panel_present" || echo no >"$_mb_dir/panel_present"
+	if [ -f "$CONFIG" ]; then
+		echo yes >"$_mb_dir/config_present"
+		cp -p "$CONFIG" "$_mb_dir/config.csqtt"
+		chmod 0600 "$_mb_dir/config.csqtt" 2>/dev/null || true
+		config_sha >"$_mb_dir/config.sha256"
+		_mb_mode=$(stat -c '%a' "$CONFIG" 2>/dev/null || true)
+		printf '%s\n' "${_mb_mode:-600}" >"$_mb_dir/config_mode"
+	else
+		echo no >"$_mb_dir/config_present"
+	fi
+	if service_enabled; then echo yes >"$_mb_dir/service_enabled"; else echo no >"$_mb_dir/service_enabled"; fi
+	if service_running; then echo yes >"$_mb_dir/service_running"; else echo no >"$_mb_dir/service_running"; fi
+	# Активное ядро до операции: откат возвращает общие точки входа именно к
+	# нему, а не к «лучшему установленному» (после неудачной установки набор
+	# мог измениться). Пусто — точек входа ещё нет.
+	_mb_active=$(cat "$ROOT/usr/lib/csqtt/active" 2>/dev/null || true)
+	printf '%s\n' "$_mb_active" >"$_mb_dir/active_core"
+	if [ -s "$_mb_dir/core_version" ] && [ -n "$(cat "$_mb_dir/core_version")" ]; then
+		copy_pkg_files "$CORE_PACKAGE" "$_mb_dir/core" || return 1
+	fi
+	if [ -s "$_mb_dir/panel_version" ] && [ -n "$(cat "$_mb_dir/panel_version")" ]; then
+		copy_pkg_files "$PANEL_PACKAGE" "$_mb_dir/panel" || return 1
+	fi
+	chmod 0700 "$_mb_dir" "$_mb_dir/core" "$_mb_dir/panel" 2>/dev/null || true
+	printf '%s\n' "$_mb_dir"
+}
+
+remove_new_files() { # remove_new_files PKG OLD_LIST
+	_rnf_pkg=$1
+	_rnf_old=$2
+	_rnf_root=${ROOT%/}
+	[ -f "$_rnf_old" ] || return 0
+	pkg_files "$_rnf_pkg" | while IFS= read -r _rnf_f; do
+		[ -n "$_rnf_f" ] || continue
+		case "$_rnf_f" in /*) ;; *) continue ;; esac
+		grep -Fxq "$_rnf_f" "$_rnf_old" && continue
+		rm -f "$_rnf_root$_rnf_f" 2>/dev/null || true
+	done
+}
+
+restore_files() { # restore_files BACKUP_PKG_DIR [LABEL]
+	_rs_dir=$1
+	_rs_label=${2:-files}
+	_rs_root=${ROOT%/}
+	[ -d "$_rs_dir/files" ] || return 0
+	[ -f "$_rs_dir/files.list" ] || return 0
+	while IFS= read -r _rs_f; do
+		[ -n "$_rs_f" ] || continue
+		_rs_src="$_rs_dir/files$_rs_f"
+		[ -f "$_rs_src" ] || [ -L "$_rs_src" ] || {
+			err "откат: в снимке $_rs_label нет файла $_rs_f"
+			return 1
+		}
+		mkdir -p "$(dirname "$_rs_root$_rs_f")" || {
+			err "откат: не удалось создать каталог для $_rs_f"
+			return 1
+		}
+		rm -f "$_rs_root$_rs_f" || {
+			err "откат: не удалось удалить текущий $_rs_f"
+			return 1
+		}
+		cp -pP "$_rs_src" "$_rs_root$_rs_f" || {
+			err "откат: не удалось вернуть файл $_rs_f"
+			return 1
+		}
+	done <"$_rs_dir/files.list"
+}
+
+restore_snapshot() { # restore_snapshot BACKUP_DIR
+	_rss_b=$1
+	[ -d "$_rss_b" ] || {
+		err "откат: снимок $_rss_b не найден"
+		return 1
+	}
+	_rss_pm=$(cat "$_rss_b/pm" 2>/dev/null || echo "$PM")
+	if [ -d "$_rss_b/core" ]; then
+		remove_new_files "$CORE_PACKAGE" "$_rss_b/core/files.list"
+	fi
+	if [ -d "$_rss_b/panel" ]; then
+		remove_new_files "$PANEL_PACKAGE" "$_rss_b/panel/files.list"
+	fi
+	if [ "$(cat "$_rss_b/core_present" 2>/dev/null || echo no)" = "no" ] &&
+		[ -n "$(installed_version_of "$CORE_PACKAGE")" ]; then
+		pm_remove "$CORE_PACKAGE" >/dev/null 2>&1 || true
+	fi
+	if [ "$(cat "$_rss_b/panel_present" 2>/dev/null || echo no)" = "no" ] &&
+		[ -n "$(installed_version_of "$PANEL_PACKAGE")" ]; then
+		pm_remove "$PANEL_PACKAGE" >/dev/null 2>&1 || true
+	fi
+	if [ -d "$_rss_b/core" ]; then restore_files "$_rss_b/core" "ядра" || return 1; fi
+	if [ -d "$_rss_b/panel" ]; then restore_files "$_rss_b/panel" "панели" || return 1; fi
+	if [ "$(cat "$_rss_b/config_present" 2>/dev/null || echo no)" = "yes" ]; then
+		[ -f "$_rss_b/config.csqtt" ] || {
+			err "откат: в снимке нет /etc/config/csqtt"
+			return 1
+		}
+		mkdir -p "$(dirname "$CONFIG")" || return 1
+		cp -p "$_rss_b/config.csqtt" "$CONFIG" || {
+			err "откат: не удалось вернуть $CONFIG"
+			return 1
+		}
+		_rss_mode=$(cat "$_rss_b/config_mode" 2>/dev/null || true)
+		case "$_rss_mode" in
+		[0-7][0-7][0-7] | [0-7][0-7][0-7][0-7]) ;;
+		*) _rss_mode=600 ;;
+		esac
+		chmod "$_rss_mode" "$CONFIG" 2>/dev/null || true
+		[ "$(config_sha)" = "$(cat "$_rss_b/config.sha256" 2>/dev/null || echo -)" ] || {
+			err "откат: SHA-256 $CONFIG не совпал со снимком"
+			return 1
+		}
+	fi
+	if [ -f "$_rss_b/keep_core253" ]; then
+		activate_core253 || {
+			err "откат: не удалось вернуть управляющий слой 2.5.3"
+			return 1
+		}
+	fi
+	# Возврат общих точек входа к ядру, активному до операции. Файлы ядра уже
+	# восстановлены; без активации /usr/bin/csqtt и /etc/init.d/csqtt могли бы
+	# указывать на неудачно установленное ядро, а служба — остаться
+	# остановленной (её останавливает postinst нового ядра).
+	_rss_active=$(cat "$_rss_b/active_core" 2>/dev/null || true)
+	if [ -n "$_rss_active" ] &&
+	   [ -x "$ROOT/usr/lib/csqtt/core-$_rss_active/activate.sh" ]; then
+		CSQTT_INSTALL_ROOT="$ROOT" \
+			sh "$ROOT/usr/lib/csqtt/core-$_rss_active/activate.sh" install "$_rss_active" \
+			|| {
+				err "откат: активатор ядра $_rss_active завершился ошибкой"
+				return 1
+			}
+		[ "$(cat "$ROOT/usr/lib/csqtt/active" 2>/dev/null || true)" = "$_rss_active" ] \
+			|| {
+				err "откат: активное ядро не вернулось к $_rss_active"
+				return 1
+			}
+	fi
+	if [ "$(cat "$_rss_b/service_running" 2>/dev/null || echo no)" = "yes" ]; then
+		restart_service
+	fi
+	return 0
+}
+
+restored_file_matches() { # restored_file_matches SNAPSHOT_FILE RESTORED_FILE
+	if [ -L "$1" ]; then
+		[ -L "$2" ] && [ "$(readlink "$1")" = "$(readlink "$2")" ]
+	else
+		[ -f "$2" ] && [ ! -L "$2" ] && cmp -s "$1" "$2"
+	fi
+}
+
+verify_restored() { # verify_restored BACKUP_DIR
+	_vr_b=$1
+	if [ "$(cat "$_vr_b/config_present" 2>/dev/null || echo no)" = "yes" ]; then
+		[ "$(config_sha)" = "$(cat "$_vr_b/config.sha256" 2>/dev/null || echo -)" ] || {
+			err "конфигурация не совпадает со снимком"
+			return 1
+		}
+	fi
+	if [ "$(cat "$_vr_b/core_present" 2>/dev/null || echo no)" = "yes" ]; then
+		[ -d "$_vr_b/core" ] && [ -f "$_vr_b/core/files.list" ] || {
+			err "снимок файлов ядра отсутствует"
+			return 1
+		}
+		while IFS= read -r _vr_f; do
+			[ -n "$_vr_f" ] || continue
+			restored_file_matches "$_vr_b/core/files$_vr_f" "${ROOT%/}$_vr_f" || {
+				err "после отката файл ядра отличается от снимка: $_vr_f"
+				return 1
+			}
+		done <"$_vr_b/core/files.list"
+	fi
+	if [ "$(cat "$_vr_b/panel_present" 2>/dev/null || echo no)" = "yes" ]; then
+		[ -d "$_vr_b/panel" ] && [ -f "$_vr_b/panel/files.list" ] || {
+			err "снимок файлов панели отсутствует"
+			return 1
+		}
+		while IFS= read -r _vr_f; do
+			[ -n "$_vr_f" ] || continue
+			restored_file_matches "$_vr_b/panel/files$_vr_f" "${ROOT%/}$_vr_f" || {
+				err "после отката файл панели отличается от снимка: $_vr_f"
+				return 1
+			}
+		done <"$_vr_b/panel/files.list"
+	fi
+	return 0
+}
+
+# --- проверка состояния ----------------------------------------------------
+
+state_check() { # state_check SET
+	_sc_set=$1
+	_sc_fail=0
+	if [ "$_sc_set" = "core" ] || [ "$_sc_set" = "both" ]; then
+		_sc_v=$(installed_version_of "$CORE_PACKAGE")
+		case "$_sc_v" in
+		"$CORE_VERSION" | "$CORE_VERSION"-*) ;;
+		*)
+			err "ядро $CORE_PACKAGE: ожидалась версия $CORE_VERSION, установлена '${_sc_v:-нет}'"
+			_sc_fail=1
+			;;
+		esac
+		[ -f "$ROOT/usr/bin/csqtt-$CORE_VERSION" ] || {
+			err "нет /usr/bin/csqtt-$CORE_VERSION"
+			_sc_fail=1
+		}
+		[ "$CORE_VERSION" != 2.5.3 ] || [ -f "$ROOT/usr/lib/csqtt/core-2.5.3/bin/csqtt-control" ] || {
+			err "нет управляющего слоя /usr/lib/csqtt/core-2.5.3/bin/csqtt-control"
+			_sc_fail=1
+		}
+		dep_ok kmod-tun || {
+			err "не установлена зависимость kmod-tun"
+			_sc_fail=1
+		}
+	fi
+	if [ "$_sc_set" = "panel" ] || [ "$_sc_set" = "both" ]; then
+		_sc_v=$(installed_version_of "$PANEL_PACKAGE")
+		[ -n "$_sc_v" ] || {
+			err "панель $PANEL_PACKAGE не установлена"
+			_sc_fail=1
+		}
+		[ -f "$ROOT/usr/share/luci/menu.d/luci-app-csqtt.json" ] || {
+			err "нет файла меню LuCI панели"
+			_sc_fail=1
+		}
+		for _sc_d in luci-base rpcd-mod-ucode ucode-mod-socket coreutils-timeout; do
+			dep_ok "$_sc_d" || {
+				err "не установлена зависимость панели: $_sc_d"
+				_sc_fail=1
+			}
+		done
+	fi
+	if [ "$CFG_PRESENT_BEFORE" -eq 1 ] && [ "$(config_sha)" != "$CFG_SHA_BEFORE" ]; then
+		err "SHA-256 /etc/config/csqtt изменился: профили/секреты/device_id должны сохраняться"
+		_sc_fail=1
+	fi
+	[ "$_sc_fail" -eq 0 ]
+}
+
+# --- выбор состава ---------------------------------------------------------
+
+# [057] Наличие ядра 2.1.9 для точной линии OpenWrt, архитектуры и формата
+# пакетов. Меню показывает пункты 2.1.9 только после подтверждения по
+# SHA256SUMS выпуска: без сети, без выпуска или без подходящего файла пункты
+# скрыты, а установка 2.5.3/панели остаётся доступной.
+probe_core219() {
+	CORE219_AVAILABLE=0
+	detect_pm_soft
+	detect_series
+	load_release >/dev/null 2>&1 || true
+	[ "$RELEASE_READY" -eq 1 ] || return 0
+	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) return 0 ;; esac
+	[ -n "$PKG_EXT" ] || return 0
+	mkdir -p "$WORK" 2>/dev/null || return 0
+	fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
+	[ -s "$WORK/SHA256SUMS" ] || return 0
+	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
+	escape_re csqtt-core-2.1.9
+	_c219=$(pick_asset "^${RE_ESC}[_-]${ARCH_RE}[.]${PKG_EXT}\$")
+	[ -n "$_c219" ] || _c219=$(pick_asset "^${RE_ESC}[_-].*[_-]${ARCH_RE}[.]${PKG_EXT}\$")
+	case "$_c219" in
+	'' | AMBIGUOUS) return 0 ;;
+	esac
+	CORE219_AVAILABLE=1
+	# Найденный тег запоминается, чтобы require_release не спрашивал API снова.
+	[ -n "$TAG" ] && CSQTT_RELEASE_TAG=$TAG
+	return 0
+}
+
+menu_select() {
+	[ -t 0 ] || die "для --menu нужен TTY; без TTY укажите --set core|panel|both" "$EX_USAGE"
+	probe_core219
+	printf 'Выберите состав:\n' >&2
+	printf '  1) ядро 2.5.3 и панель\n' >&2
+	printf '  2) только ядро 2.5.3\n' >&2
+	printf '  3) только панель\n' >&2
+	_menu_del=0
+	if [ "$CORE219_AVAILABLE" -eq 1 ]; then
+		printf '  4) ядро 2.1.9 и панель\n' >&2
+		printf '  5) только ядро 2.1.9\n' >&2
+		_menu_del=6
+	elif [ "$CORE219_AVAILABLE" -eq 0 ]; then
+		info "пункты ядра 2.1.9 скрыты: для ${SERIES:-этой линии}/${ARCH:-этой архитектуры} (${PKG_EXT:-формат}) в выпуске нет пакета"
+		_menu_del=4
+	fi
+	case "$ACTION" in
+	install | update | uninstall) printf '  %s) удалить\n' "$_menu_del" >&2 ;;
+	esac
+	printf '> ' >&2
+	read -r _menu_ans || _menu_ans=""
+	case "$_menu_ans" in
+	1)
+		INSTALL_SET="both"
+		CORE_VERSION=2.5.3
+		CORE_PACKAGE=csqtt-core-2.5.3
+		;;
+	2)
+		INSTALL_SET="core"
+		CORE_VERSION=2.5.3
+		CORE_PACKAGE=csqtt-core-2.5.3
+		;;
+	3) INSTALL_SET="panel" ;;
+	"$_menu_del")
+		case "$ACTION" in
+		install | update)
+			INSTALL_SET="both"
+			ACTION="uninstall"
+			;;
+		uninstall) INSTALL_SET="both" ;;
+		*) die "для удаления запустите uninstall --set both" "$EX_USAGE" ;;
+		esac
+		# Для удаления важно то, что установлено, а не выбранная ветка ядра.
+		CORE_VERSION=2.5.3
+		CORE_PACKAGE=csqtt-core-2.5.3
+		CORE_BRANCH=""
+		;;
+	4)
+		[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
+		INSTALL_SET="both"
+		CORE_BRANCH=2.1.9
+		;;
+	5)
+		[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
+		INSTALL_SET="core"
+		CORE_BRANCH=2.1.9
+		;;
+	*) die "неизвестный выбор: $_menu_ans" "$EX_USAGE" ;;
+	esac
+}
+
+resolve_set() {
+	case "$INSTALL_SET" in
+	core | panel | both) ;;
+	"") die "не задан состав: --set core|panel|both (или --menu)" "$EX_USAGE" ;;
+	*) die "неизвестный состав: $INSTALL_SET (core|panel|both)" "$EX_USAGE" ;;
+	esac
+}
+
+confirm() {
+	[ "$ASSUME_YES" -eq 1 ] && return 0
+	[ -t 0 ] || die "нет терминала для подтверждения; используйте --yes" "$EX_USAGE"
+	printf '%s [y/N]: ' "$1" >&2
+	read -r _c_ans || _c_ans=""
+	case "$_c_ans" in
+	y | Y | yes | YES) return 0 ;;
+	*) die "отменено пользователем" "$EX_USAGE" ;;
+	esac
+}
+
+# --- действия --------------------------------------------------------------
+
+# [063] check: только чтение. Ничего не устанавливает и не меняет состояние:
+# сравнивает полные пакетные версии установленного и опубликованного пакета
+# для этой линии OpenWrt/архитектуры/формата. Маркеры CHECK*/RELEASE_*
+# разбирает панель; отсутствие подходящего пакета, ненастроенный выпуск,
+# неопубликованный выпуск и ошибка сети различаются отдельными маркерами.
+cmd_check() {
+	resolve_set
+	detect_pm_soft
+	detect_series
+	load_release
+	emit "CHECK_BEGIN|set:$INSTALL_SET|pm:${PM:-none}|ext:${PKG_EXT:--}|arch:${ARCH:-unknown}|series:${SERIES:--}|line:${SERIES_LINE:--}"
+
+	# Заметки выпуска — JSON GitHub API, если панель попросила сохранить его.
+	if [ -n "$API_JSON" ] && [ -f "$API_JSON" ] && [ -n "${CSQTT_INSTALLER_NOTES_FILE:-}" ]; then
+		if mkdir -p "$(dirname "$CSQTT_INSTALLER_NOTES_FILE")" 2>/dev/null &&
+			cp "$API_JSON" "$CSQTT_INSTALLER_NOTES_FILE" 2>/dev/null; then
+			chmod 0644 "$CSQTT_INSTALLER_NOTES_FILE" 2>/dev/null || true
+		else
+			warn "не удалось сохранить заметки выпуска: $CSQTT_INSTALLER_NOTES_FILE"
+		fi
+	fi
+	# Явный тег: /releases/latest не запрашивался, поэтому заметки берутся по
+	# точному тегу. Сеть/API недоступны — это не ошибка проверки: панель
+	# покажет версии без заметок.
+	if [ -z "$API_JSON" ] && [ -n "${CSQTT_INSTALLER_NOTES_FILE:-}" ] &&
+		[ -n "$OWNER" ] && [ -n "$REPO" ] && [ -n "$TAG" ] &&
+		[ "${CSQTT_RELEASE_DISCOVER:-1}" != "0" ]; then
+		_nt_json="$TMPBASE/csqtt-notes.$$.json"
+		mkdir -p "$TMPBASE" 2>/dev/null || true
+		if fetch "${API_BASE}/repos/$OWNER/$REPO/releases/tags/$TAG" "$_nt_json" &&
+			[ -s "$_nt_json" ]; then
+			if mkdir -p "$(dirname "$CSQTT_INSTALLER_NOTES_FILE")" 2>/dev/null &&
+				cp "$_nt_json" "$CSQTT_INSTALLER_NOTES_FILE" 2>/dev/null; then
+				chmod 0644 "$CSQTT_INSTALLER_NOTES_FILE" 2>/dev/null || true
+			fi
+			API_JSON="$_nt_json"
+		else
+			rm -f "$_nt_json"
+		fi
+	fi
+
+	if [ "$RELEASE_READY" -ne 1 ]; then
+		case "$RELEASE_STATE" in
+		not_published)
+			err "опубликованный выпуск не найден: ${OWNER:--}/${REPO:--} (GitHub Releases)"
+			emit "RELEASE_NOT_PUBLISHED|owner:${OWNER:--}|repo:${REPO:--}"
+			exit "$EX_BLOCKED"
+			;;
+		api_unreachable)
+			err "не удалось проверить выпуски ${OWNER:--}/${REPO:--}: GitHub API недоступен (сеть/прокси)"
+			emit "CHECK_FAILED|stage:release_api|reason:network"
+			exit "$EX_PREFLIGHT"
+			;;
+		esac
+		err "проверка невозможна: не заданы owner/repo/tag (окружение или $RELEASE_CONF)"
+		emit "RELEASE_BLOCKED|owner:${OWNER:--}|repo:${REPO:--}|tag:${TAG:--}"
+		exit "$EX_BLOCKED"
+	fi
+	emit "CHECK_RELEASE|owner:${OWNER:--}|repo:${REPO:--}|tag:${TAG:--}|url:$BASE_URL"
+	info "выпуск: $BASE_URL"
+
+	if [ "$PM" = "none" ] || [ -z "$ARCH" ] || [ -z "$PKG_EXT" ]; then
+		err "менеджер пакетов и архитектура не определены (opkg/apk)"
+		emit "CHECK_FAILED|stage:package_manager|reason:${PM:-none}"
+		exit "$EX_PREFLIGHT"
+	fi
+
+	mkdir -p "$WORK"
+	if ! fetch "$BASE_URL/SHA256SUMS" "$WORK/SHA256SUMS"; then
+		err "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть)"
+		emit "CHECK_FAILED|stage:manifest|reason:network_or_404"
+		exit "$EX_PREFLIGHT"
+	fi
+	if [ ! -s "$WORK/SHA256SUMS" ]; then
+		err "SHA256SUMS пуст: выпуск неполный"
+		emit "CHECK_FAILED|stage:manifest|reason:empty"
+		exit "$EX_PREFLIGHT"
+	fi
+
+	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
+	_check_bad=0
+	_check_summary=""
+	_plan_parts=""
+	for _cc in core panel; do
+		case "$INSTALL_SET" in
+		core) [ "$_cc" = panel ] && continue ;;
+		panel) [ "$_cc" = core ] && continue ;;
+		esac
+		if [ "$_cc" = core ]; then
+			escape_re "$CORE_PACKAGE"
+			_cc_sel=$(pick_asset "^${RE_ESC}[_-]${ARCH_RE}[.]${PKG_EXT}\$")
+			[ -n "$_cc_sel" ] || _cc_sel=$(pick_asset "^${RE_ESC}[_-].*[_-]${ARCH_RE}[.]${PKG_EXT}\$")
+			_cc_inst=$(installed_version_of "$CORE_PACKAGE")
+		else
+			escape_re "$PANEL_PACKAGE"
+			_cc_sel=$(pick_asset "^${RE_ESC}[_-]all[.]${PKG_EXT}\$")
+			[ -n "$_cc_sel" ] || _cc_sel=$(pick_asset "^${RE_ESC}[_-].*[_-]all[.]${PKG_EXT}\$")
+			_cc_inst=$(installed_version_of "$PANEL_PACKAGE")
+		fi
+		if [ "$_cc_sel" = "AMBIGUOUS" ]; then
+			emit "CHECK|component:$_cc|installed:${_cc_inst:--}|state:ambiguous|ext:$PKG_EXT|series:${SERIES:--}"
+			_check_bad=1
+			_check_summary="$_check_summary $_cc:ambiguous"
+			continue
+		fi
+		if [ -z "$_cc_sel" ]; then
+			emit "CHECK|component:$_cc|installed:${_cc_inst:--}|state:no_package|arch:$ARCH|ext:$PKG_EXT|series:${SERIES:--}"
+			_check_bad=1
+			_check_summary="$_check_summary $_cc:no_package"
+			continue
+		fi
+		if ! check_download "$_cc_sel"; then
+			err "не удалось получить $CHECK_ERR_NAME ($CHECK_ERR)"
+			emit "CHECK_FAILED|stage:download|reason:$CHECK_ERR|name:$CHECK_ERR_NAME"
+			_check_bad=1
+			_check_summary="$_check_summary $_cc:download_$CHECK_ERR"
+			continue
+		fi
+		_cc_name=$(printf '%s' "$_cc_sel" | awk '{print $2}')
+		_cc_sha=$(printf '%s' "$_cc_sel" | awk '{print $1}')
+		_cc_bytes=$(wc -c <"$WORK/$_cc_name" | awk '{print $1}')
+		_cc_avail=$(pkg_version_of_file "$WORK/$_cc_name")
+		if [ -z "$_cc_avail" ]; then
+			_cc_state=unknown
+		elif [ -z "$_cc_inst" ]; then
+			_cc_state=not_installed
+		else
+			case "$(ver_cmp "$_cc_avail" "$_cc_inst")" in
+			1) _cc_state=update ;;
+			0) _cc_state=current ;;
+			*) _cc_state=downgrade ;;
+			esac
+		fi
+		emit "CHECK|component:$_cc|installed:${_cc_inst:--}|available:${_cc_avail:--}|state:$_cc_state|name:$_cc_name|sha256:$_cc_sha|bytes:${_cc_bytes:-0}"
+		_plan_ok=1
+		case "$_cc_name" in '' | *[!A-Za-z0-9._+~-]*) _plan_ok=0 ;; esac
+		case "$_cc_sha" in *[!0-9a-f]*) _plan_ok=0 ;; esac
+		case "$_cc_avail" in '' | *[!A-Za-z0-9._+~:-]*) _plan_ok=0 ;; esac
+		case "$_cc_bytes" in '' | *[!0-9]*) _cc_bytes=0 ;; esac
+		if [ "$_plan_ok" -eq 1 ]; then
+			_plan_parts="$_plan_parts,\"$_cc\":{\"name\":\"$_cc_name\",\"sha256\":\"$_cc_sha\",\"available\":\"$_cc_avail\",\"state\":\"$_cc_state\",\"bytes\":$_cc_bytes}"
+		fi
+		_check_summary="$_check_summary $_cc:$_cc_state"
+	done
+	emit "CHECK_DONE|set:$INSTALL_SET|components:${_check_summary# }|bad:$_check_bad"
+	[ "$_check_bad" -eq 0 ] && write_plan
+	[ "$_check_bad" -eq 0 ] || exit "$EX_PREFLIGHT"
+	return 0
+}
+
+cmd_inventory() {
+	detect_pm_soft
+	echo "Inventory установки CSQTT для OpenWrt (только чтение)" >&2
+	printf '  Менеджер: %s%s; архитектура: %s\n' "$PM" "$([ -n "$PKG_EXT" ] && echo " (.$PKG_EXT)")" "${ARCH:-неизвестна}" >&2
+	printf '  opkg: %s; apk: %s\n' "$HAVE_OPKG" "$HAVE_APK" >&2
+	load_release
+	printf '  Выпуск: %s\n' "$([ "$RELEASE_READY" -eq 1 ] && echo "$BASE_URL" || echo 'BLOCKED (owner/repo/tag не заданы)')" >&2
+	printf '  Ядро: %s; установлено: %s\n' "$CORE_VERSION" "$(installed_version_of "$CORE_PACKAGE" 2>/dev/null || true)" >&2
+	printf '  Панель: установлено: %s\n' "$(installed_version_of "$PANEL_PACKAGE" 2>/dev/null || true)" >&2
+	printf '  /etc/config/csqtt: %s\n' "$([ -f "$CONFIG" ] && echo есть || echo нет)" >&2
+	printf '  Служба включена: %s\n' "$(service_enabled && echo да || echo нет)" >&2
+	emit "INVENTORY|pm:${PM:-none}|ext:${PKG_EXT:--}|arch:${ARCH:-unknown}|core:$(installed_version_of "$CORE_PACKAGE" 2>/dev/null || true)|panel:$(installed_version_of "$PANEL_PACKAGE" 2>/dev/null || true)|config:$([ -f "$CONFIG" ] && echo yes || echo no)|service:$(service_enabled && echo yes || echo no)"
+	return 0
+}
+
+cmd_status() {
+	detect_pm_soft
+	echo "Статус установки CSQTT для OpenWrt" >&2
+	printf '  Менеджер: %s (.%s), архитектура: %s\n' "$PM" "${PKG_EXT:--}" "${ARCH:-?}" >&2
+	printf '  Ядро %s: %s\n' "$CORE_VERSION" "$(installed_version_of "$CORE_PACKAGE" 2>/dev/null || echo не установлено)" >&2
+	printf '  Панель: %s\n' "$(installed_version_of "$PANEL_PACKAGE" 2>/dev/null || echo не установлена)" >&2
+	printf '  Конфигурация: %s\n' "$([ -f "$CONFIG" ] && echo есть || echo нет)" >&2
+	printf '  Служба включена: %s\n' "$(service_enabled && echo да || echo нет)" >&2
+	printf '  Последний снимок: %s\n' "$(cat "$STATE_DIR/last-backup" 2>/dev/null || echo -)" >&2
+	emit "STATUS|core:$(installed_version_of "$CORE_PACKAGE" 2>/dev/null || true)|panel:$(installed_version_of "$PANEL_PACKAGE" 2>/dev/null || true)"
+	return 0
+}
+
+cmd_verify() {
+	resolve_set
+	detect_pm
+	CFG_PRESENT_BEFORE=0
+	[ -f "$CONFIG" ] && CFG_PRESENT_BEFORE=1
+	CFG_SHA_BEFORE=$(config_sha)
+	step "Проверка без изменений"
+	if state_check "$INSTALL_SET"; then
+		ok "Проверка пройдена: $INSTALL_SET"
+		emit "VERIFY_OK|$INSTALL_SET"
+		return 0
+	fi
+	err "Проверка не пройдена; изменения не вносились"
+	emit "VERIFY_FAILED|$INSTALL_SET"
+	return "$EX_PREFLIGHT"
+}
+
+activate_core253() {
+	_ac_helper=/usr/lib/csqtt/core-2.5.3/activate.sh
+	_ac_controller=/usr/lib/csqtt/core-2.5.3/bin/csqtt-control
+	# The legacy engine runs in the controller provided by the 2.1.9 package.
+	# Its activation helper also supports previously released 2.5.3 packages.
+	if [ -f "$ROOT/usr/lib/csqtt/core-2.1.9/owns-controller" ]; then
+		_ac_helper=/usr/lib/csqtt/core-2.1.9/activate.sh
+		_ac_controller=/usr/lib/csqtt/core-2.1.9/bin/csqtt-control
+	fi
+	CSQTT_INSTALL_ROOT="$ROOT" sh "$ROOT$_ac_helper" install 2.5.3 &&
+		[ "$(cat "$ROOT/usr/lib/csqtt/active" 2>/dev/null)" = 2.5.3 ] &&
+		[ "$(readlink "$ROOT/usr/bin/csqtt" 2>/dev/null)" = "$_ac_controller" ]
+}
+
+cmd_install() { # cmd_install install|update
+	_ci_mode=$1
+	resolve_set
+	require_release
+	detect_pm
+	detect_series
+	validate_pins
+	take_lock
+	keep_core253=0
+	if [ "$CORE_VERSION" = 2.1.9 ] && [ -n "$(installed_version_of csqtt-core-2.5.3)" ]; then
+		[ -r "$ROOT/usr/lib/csqtt/core-2.5.3/activate.sh" ] &&
+			[ -x "$ROOT/usr/lib/csqtt/core-2.5.3/bin/csqtt-control" ] ||
+			die "у установленного 2.5.3 нет полного управляющего слоя; установка отменена" "$EX_PREFLIGHT"
+		keep_core253=1
+	fi
+	fetch_manifest
+	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
+	SELECTED_CORE=""
+	SELECTED_PANEL=""
+	FILES=""
+	if [ "$INSTALL_SET" = "core" ] || [ "$INSTALL_SET" = "both" ]; then
+		if [ -n "$PIN_NAME" ]; then
+			[ "$INSTALL_SET" = "core" ] || die "--pin-* несовместимы с --set both: привязка только к одному компоненту" "$EX_USAGE"
+			pin_asset "ядро"
+			SELECTED_CORE="$PIN_ASSET"
+		else
+			select_core
+		fi
+		[ -n "$SELECTED_CORE" ] || die "в SHA256SUMS нет ядра $CORE_PACKAGE для архитектуры $ARCH (.$PKG_EXT); неверный ABI или неполный выпуск" "$EX_PREFLIGHT"
+		download_asset "$SELECTED_CORE" "ядро"
+		[ -n "$PIN_NAME" ] && verify_pinned_pkg "$PIN_NAME"
+		FILES="$FILES $(printf '%s' "$SELECTED_CORE" | awk '{print $2}')"
+	fi
+	if [ "$INSTALL_SET" = "panel" ] || [ "$INSTALL_SET" = "both" ]; then
+		if [ -n "$PIN_NAME" ]; then
+			[ "$INSTALL_SET" = "panel" ] || die "--pin-* несовместимы с --set both: привязка только к одному компоненту" "$EX_USAGE"
+			pin_asset "панель"
+			SELECTED_PANEL="$PIN_ASSET"
+		else
+			select_panel
+		fi
+		[ -n "$SELECTED_PANEL" ] || die "в SHA256SUMS нет панели $PANEL_PACKAGE (all) для .$PKG_EXT; неполный выпуск" "$EX_PREFLIGHT"
+		download_asset "$SELECTED_PANEL" "панель"
+		[ -n "$PIN_NAME" ] && verify_pinned_pkg "$PIN_NAME"
+		FILES="$FILES $(printf '%s' "$SELECTED_PANEL" | awk '{print $2}')"
+	fi
+
+	if [ "$_ci_mode" = "update" ]; then
+		if [ "$INSTALL_SET" = "core" ] && [ -z "$(installed_version_of "$CORE_PACKAGE")" ]; then
+			die "update: ядро $CORE_PACKAGE не установлено; для первой установки используйте install" "$EX_PREFLIGHT"
+		fi
+		if [ "$INSTALL_SET" = "panel" ] && [ -z "$(installed_version_of "$PANEL_PACKAGE")" ]; then
+			die "update: панель $PANEL_PACKAGE не установлена; для первой установки используйте install" "$EX_PREFLIGHT"
+		fi
+	fi
+
+	step "Проверка свободного места"
+	space_preflight
+
+	step "Проверка совместимости набора ($PM)"
+	if ! pm_dry_run_selected; then
+		die "сухой прогон $PM отверг набор (неверный ABI, зависимости или версия); изменения не вносились" "$EX_PREFLIGHT"
+	fi
+	ok "набор разрешается без изменений"
+
+	step "План"
+	[ -n "$SELECTED_CORE" ] && ok "ядро: $(printf '%s' "$SELECTED_CORE" | awk '{print $2}')"
+	[ -n "$SELECTED_PANEL" ] && ok "панель: $(printf '%s' "$SELECTED_PANEL" | awk '{print $2}')"
+	ok "состав: $INSTALL_SET; конфигурация /etc/config/csqtt сохраняется"
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		ok "dry-run: изменения не вносились"
+		emit "DRY_RUN|$INSTALL_SET"
+		return 0
+	fi
+
+	confirm "Установить/обновить CSQTT ($INSTALL_SET) и перезапустить службу при необходимости?"
+
+	ensure_state
+	CFG_PRESENT_BEFORE=0
+	[ -f "$CONFIG" ] && CFG_PRESENT_BEFORE=1
+	CFG_SHA_BEFORE=$(config_sha)
+	BACKUP=$(make_backup "$_ci_mode") || die "не удалось создать снимок для отката; изменения не вносились" "$EX_FAILED"
+	step "Снимок состояния: $BACKUP"
+	printf '%s\n' "$BACKUP" >"$STATE_DIR/last-backup"
+	if [ "$INSTALL_SET" != panel ] && [ "$CORE_VERSION" = 2.5.3 ] &&
+	   [ -n "$(installed_version_of "$CORE_PACKAGE")" ] &&
+	   [ -f "$ROOT/usr/lib/csqtt/core-2.1.9/owns-controller" ]; then
+		keep_core253=1
+	fi
+	[ "$keep_core253" -eq 0 ] || : >"$BACKUP/keep_core253"
+
+	# shellcheck disable=SC2086
+	if ! pm_install_selected || { [ "$keep_core253" -eq 1 ] && ! activate_core253; }; then
+		err "$PM не установил набор или не удалось восстановить управляющий слой 2.5.3"
+		if restore_snapshot "$BACKUP" && verify_restored "$BACKUP"; then
+			warn "прежнее состояние восстановлено из $BACKUP"
+			emit "ROLLED_BACK|$BACKUP"
+			exit "$EX_RECOVERED"
+		fi
+		die "установка и восстановление не удались; ручной откат: $0 rollback --backup $BACKUP" "$EX_FAILED"
+	fi
+
+	[ "$INSTALL_SET" = panel ] || restart_service
+
+	step "Проверка после установки"
+	if state_check "$INSTALL_SET"; then
+		ok "Установка завершена: $INSTALL_SET"
+		ok "Снимок для отката: $BACKUP"
+		emit "OK|$INSTALL_SET"
+		return 0
+	fi
+
+	err "проверка после установки не пройдена"
+	if restore_snapshot "$BACKUP" && verify_restored "$BACKUP"; then
+		warn "прежнее состояние восстановлено: $BACKUP"
+		warn "версия в базе $PM может отличаться от восстановленных файлов; при необходимости: $PM remove $CORE_PACKAGE $PANEL_PACKAGE"
+		emit "ROLLED_BACK|$BACKUP"
+		exit "$EX_RECOVERED"
+	fi
+	die "откат не удался; ручная команда: $0 rollback --backup $BACKUP" "$EX_FAILED"
+}
+
+cmd_rollback() {
+	detect_pm
+	_rb_dir=$BACKUP_ARG
+	[ -n "$_rb_dir" ] || _rb_dir=$(cat "$STATE_DIR/last-backup" 2>/dev/null || true)
+	[ -n "$_rb_dir" ] || die "не указан снимок: --backup DIR (нет и last-backup)" "$EX_USAGE"
+	[ -d "$_rb_dir" ] || die "каталог снимка не найден: $_rb_dir" "$EX_USAGE"
+	case "$(cat "$_rb_dir/core_package" 2>/dev/null || true)" in
+	csqtt-core-2.1.9) CORE_PACKAGE=csqtt-core-2.1.9 ;;
+	esac
+	if [ "$DRY_RUN" -eq 1 ]; then
+		ok "dry-run: будет восстановлен снимок $_rb_dir"
+		emit "DRY_RUN|rollback"
+		return 0
+	fi
+	confirm "Восстановить файлы и /etc/config/csqtt из $_rb_dir?"
+	take_lock
+	stop_service
+	if restore_snapshot "$_rb_dir" && verify_restored "$_rb_dir"; then
+		ok "Откат выполнен: $_rb_dir"
+		emit "ROLLED_BACK|$_rb_dir"
+		return 0
+	fi
+	die "откат не удался; снимок сохранён: $_rb_dir" "$EX_FAILED"
+}
+
+cmd_uninstall() {
+	resolve_set
+	detect_pm
+	if [ "$PURGE" -eq 1 ] && [ "$INSTALL_SET" = "panel" ]; then
+		die "--purge с --set panel удалил бы /etc/config/csqtt при установленном ядре; используйте --set both или сначала удалите ядро" "$EX_USAGE"
+	fi
+	if [ "$DRY_RUN" -eq 1 ]; then
+		ok "dry-run: будут удалены: $INSTALL_SET"
+		ok "конфигурация /etc/config/csqtt сохраняется$([ "$PURGE" -eq 1 ] && echo ' (--purge: будет удалена)')"
+		emit "DRY_RUN|uninstall|$INSTALL_SET"
+		return 0
+	fi
+	confirm "Удалить CSQTT ($INSTALL_SET)? Конфигурация сохраняется, если не указан --purge."
+	take_lock
+	ensure_state
+	BACKUP=$(make_backup "uninstall") || true
+	[ -n "$BACKUP" ] && printf '%s\n' "$BACKUP" >"$STATE_DIR/last-backup"
+	# Служба работала до удаления? Тогда оставшееся ядро должно снова её
+	# поднять: postrm останавливает службу, а пользователь ждёт рабочий движок.
+	_ui_was_running=0
+	if [ "$INSTALL_SET" != panel ] && service_running; then _ui_was_running=1; fi
+	[ "$INSTALL_SET" = panel ] || stop_service
+	_ui_fail=0
+	if [ "$INSTALL_SET" = "panel" ] || [ "$INSTALL_SET" = "both" ]; then
+		if [ -n "$(installed_version_of "$PANEL_PACKAGE")" ]; then
+			pm_remove "$PANEL_PACKAGE" || _ui_fail=1
+		fi
+	fi
+	if [ "$INSTALL_SET" = "core" ] || [ "$INSTALL_SET" = "both" ]; then
+		# [057] Явный --core-version 2.1.9 удаляет только это ядро; без него
+		# (меню или обычный --set core) удаляются оба возможных ядра, чтобы
+		# установленное ядро не осталось незамеченным.
+		_ui_cores="csqtt-core-2.1.9 csqtt-core-2.5.3"
+		[ -z "$CORE_BRANCH" ] || _ui_cores=$CORE_PACKAGE
+		for _ui_cp in $_ui_cores; do
+			[ -n "$(installed_version_of "$_ui_cp")" ] || continue
+			pm_remove "$_ui_cp" || _ui_fail=1
+		done
+	fi
+	[ "$_ui_fail" -eq 0 ] || die "удаление завершилось ошибкой $PM; конфигурация не тронута" "$EX_FAILED"
+	if [ "$INSTALL_SET" = "panel" ] || [ "$INSTALL_SET" = "both" ]; then
+		[ -z "$(installed_version_of "$PANEL_PACKAGE")" ] || {
+			err "панель $PANEL_PACKAGE всё ещё числится установленной"
+			_ui_fail=1
+		}
+	fi
+	if [ "$INSTALL_SET" = "core" ] || [ "$INSTALL_SET" = "both" ]; then
+		for _ui_cp in $_ui_cores; do
+			[ -z "$(installed_version_of "$_ui_cp")" ] || {
+				err "ядро $_ui_cp всё ещё числится установленным"
+				_ui_fail=1
+			}
+		done
+	fi
+	[ "$_ui_fail" -eq 0 ] || die "проверка удаления не пройдена; конфигурация не тронута" "$EX_FAILED"
+	# [057] Удаление одного ядра не должно оставлять службу остановленной:
+	# postrm остановил её, а общие точки входа переключились на оставшееся
+	# ядро. Перезапускаем только если ядро действительно осталось; после
+	# удаления последнего ядра службы нет — это правильное состояние.
+	if [ "$_ui_was_running" -eq 1 ] &&
+	   { [ -x "$ROOT/usr/lib/csqtt/core-2.1.9/etc/init.d/csqtt" ] ||
+	     [ -x "$ROOT/usr/lib/csqtt/core-2.5.3/etc/init.d/csqtt" ]; }; then
+		restart_service
+	fi
+	if [ "$PURGE" -eq 1 ]; then
+		rm -f "$CONFIG"
+		rm -rf "$STATE_DIR"
+		ok "конфигурация и состояние удалены (--purge)"
+	else
+		ok "конфигурация сохранена: $CONFIG"
+	fi
+	emit "UNINSTALLED|$INSTALL_SET"
+	return 0
+}
+
+main() {
+	parse_args "$@"
+	case "$ACTION:$MENU" in
+		install:1|update:1|check:1|uninstall:1) menu_select ;;
+	esac
+	if [ -n "$CORE_BRANCH" ]; then
+		case "$CORE_BRANCH" in
+		2.1.9 | 2.5.3) ;;
+		*) die "--core-version поддерживает 2.1.9|2.5.3 (получено: $CORE_BRANCH)" "$EX_USAGE" ;;
+		esac
+		case "$ACTION:$INSTALL_SET" in
+		check:core | check:both | install:core | install:both | update:core | update:both | uninstall:core | uninstall:both) ;;
+		*) die "--core-version $CORE_BRANCH поддерживается только для check/install/update/uninstall --set core|both" "$EX_USAGE" ;;
+		esac
+		case "$CORE_BRANCH" in
+		2.1.9)
+			CORE_VERSION=2.1.9
+			CORE_PACKAGE=csqtt-core-2.1.9
+			;;
+		2.5.3)
+			CORE_VERSION=2.5.3
+			CORE_PACKAGE=csqtt-core-2.5.3
+			;;
+		esac
+	fi
+	case "$ACTION" in
+	help) usage; exit "$EX_OK" ;;
+	esac
+	case "$ACTION" in
+	inventory) cmd_inventory ;;
+	status) cmd_status ;;
+	verify) cmd_verify ;;
+	check) cmd_check ;;
+	install) cmd_install install ;;
+	update) cmd_install update ;;
+	rollback) cmd_rollback ;;
+	uninstall) cmd_uninstall ;;
+	*)
+		usage >&2
+		die "неизвестное действие: $ACTION" "$EX_USAGE"
+		;;
+	esac
+}
+
+main "$@"

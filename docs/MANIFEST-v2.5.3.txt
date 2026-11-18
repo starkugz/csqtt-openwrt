@@ -1,0 +1,48 @@
+# CSQTT OpenWrt 2.5.3
+# source: aa0684d (development/2.5.3)
+# cores: 2.5.3-r5 (deterministic repack of r4: PKG_RELEASE + activate.sh only);
+#   2.1.9-r16 built from the same tree with the 2.1.9 controller
+# panel: 2.5-r24 (public versions hide the -rN revision; comparison keeps it)
+# MIPS: 24.10.8 ipk and 25.12.5 apk, 2.5.3 and 2.1.9; snapshot is Filogic only
+# files: 40; total bytes: 220652433
+# fields: file | component | package-version | openwrt-series | arch | format | bytes | sha256
+csqtt-core-2.1.9-openwrt-24.10.8-armsr-armv8-aarch64_generic.ipk | core | 2.1.9-r16 | 24.10.8 | aarch64_generic | ipk/opkg | 5305044 | dd60629c7761852982d4c5a8a8a378cce8d1f4afdd185f025c9e7abd0ef8f639
+csqtt-core-2.1.9-openwrt-24.10.8-mediatek-filogic-aarch64_cortex-a53.ipk | core | 2.1.9-r16 | 24.10.8 | aarch64_cortex-a53 | ipk/opkg | 5305041 | 661d51f93bb8c07c112df5ecf3bcfc0583dce80f55a0c823038e9367bb13cdbb
+csqtt-core-2.1.9-openwrt-24.10.8-ramips-mt7621-mipsel_24kc.ipk | core | 2.1.9-r16 | 24.10.8 | mipsel_24kc | ipk/opkg | 5542495 | a5bc174916e4104af68b14daf1033824a820b848b8a1038971f3325f66804719
+csqtt-core-2.1.9-openwrt-24.10.8-sunxi-cortexa7-arm_cortex-a7_neon-vfpv4.ipk | core | 2.1.9-r16 | 24.10.8 | arm_cortex-a7_neon-vfpv4 | ipk/opkg | 4895454 | 977756aa93a511400e40d09f5591b8ced549b84247909f7dbade4e7f17c67945
+csqtt-core-2.1.9-openwrt-24.10.8-x86-64-x86_64.ipk | core | 2.1.9-r16 | 24.10.8 | x86_64 | ipk/opkg | 5698800 | 02358427fbef24de5d2d50650d3ffdfd5e3c74c53e1eca81310cac7f067dc938
+csqtt-core-2.1.9-openwrt-25.12.5-armsr-armv8-aarch64_generic.apk | core | 2.1.9-r16 | 25.12.5 | aarch64_generic | apk/apk | 5306532 | 7a668c61dc386629fc7c81b0f21bf60b5c1e954d5fd53b99e99c30372a29966d
+csqtt-core-2.1.9-openwrt-25.12.5-mediatek-filogic-aarch64_cortex-a53.apk | core | 2.1.9-r16 | 25.12.5 | aarch64_cortex-a53 | apk/apk | 5306534 | 5e62cd7f25858c612c1aa960438149cfad45d6f0b8b27591605ba336ef927dbb
+csqtt-core-2.1.9-openwrt-25.12.5-ramips-mt7621-mipsel_24kc.apk | core | 2.1.9-r16 | 25.12.5 | mipsel_24kc | apk/apk | 5567237 | bf31ea9f0b18e71b9635f4fca5a8530c1b5fc00b0e239f4df56847350c68cc91
+csqtt-core-2.1.9-openwrt-25.12.5-sunxi-cortexa7-arm_cortex-a7_neon-vfpv4.apk | core | 2.1.9-r16 | 25.12.5 | arm_cortex-a7_neon-vfpv4 | apk/apk | 4895672 | 576c7e0b2720af7dd783ef6078539a440a922cc9410a33cef2b6d4027a7c9de0
+csqtt-core-2.1.9-openwrt-25.12.5-x86-64-x86_64.apk | core | 2.1.9-r16 | 25.12.5 | x86_64 | apk/apk | 5689388 | 77b52a72552ac29e8df72ef2f8b1e43a4cc9f64941d49ba76e6d6268adc4c7ac
+csqtt-core-2.1.9-openwrt-snapshot-mediatek-filogic-aarch64_cortex-a53.apk | core | 2.1.9-r16 | snapshot | aarch64_cortex-a53 | apk/apk | 5306796 | f5d54d7e511e17f516d73a7f2997e1f359e8d7ef260a69723a2de393e7283f52
+csqtt-core-2.5.3-openwrt-24.10.8-armsr-armv8-aarch64_generic.ipk | core | 2.5.3-r5 | 24.10.8 | aarch64_generic | ipk/opkg | 11199575 | 00a3de17e02442ef70e23b32f63e330654b22c7a54cd80ff72f94502fcc6d29c
+csqtt-core-2.5.3-openwrt-24.10.8-mediatek-filogic-aarch64_cortex-a53.ipk | core | 2.5.3-r5 | 24.10.8 | aarch64_cortex-a53 | ipk/opkg | 11199575 | dd1ea4e4d42056c19cb7c84edaad1e2fad8ed82f8d657497bb2ea5a4739a4d3e
+csqtt-core-2.5.3-openwrt-24.10.8-ramips-mt7621-mipsel_24kc.ipk | core | 2.5.3-r5 | 24.10.8 | mipsel_24kc | ipk/opkg | 10562888 | cd1d950d2d5fd151c519de9c98a3829ffe9b0cd31abb5e393fa854e33c786137
+csqtt-core-2.5.3-openwrt-24.10.8-sunxi-cortexa7-arm_cortex-a7_neon-vfpv4.ipk | core | 2.5.3-r5 | 24.10.8 | arm_cortex-a7_neon-vfpv4 | ipk/opkg | 10319110 | 700c0c8e9a3a2bb8e8a8e29270001932062eb11d8d2e4b3482b079ff0a3e5449
+csqtt-core-2.5.3-openwrt-24.10.8-x86-64-x86_64.ipk | core | 2.5.3-r5 | 24.10.8 | x86_64 | ipk/opkg | 11987628 | 5378a87d48105ad04710e3f1a94c12fe82ec529d3ae821d4db3a4d84d7d57da7
+csqtt-core-2.5.3-openwrt-25.12.5-armsr-armv8-aarch64_generic.apk | core | 2.5.3-r5 | 25.12.5 | aarch64_generic | apk/apk | 11198564 | d83e9a6d3cf2a48665f49691038a7bfb7113ef9721f46762ab01c902431bd9fd
+csqtt-core-2.5.3-openwrt-25.12.5-mediatek-filogic-aarch64_cortex-a53.apk | core | 2.5.3-r5 | 25.12.5 | aarch64_cortex-a53 | apk/apk | 11198584 | a34b520a7a2f8d41bcacd3160203fb1c77661716e51ea5e43cdaff47d7a1e146
+csqtt-core-2.5.3-openwrt-25.12.5-ramips-mt7621-mipsel_24kc.apk | core | 2.5.3-r5 | 25.12.5 | mipsel_24kc | apk/apk | 10640665 | 618a1df11513c12952edf98f466ef87c6bb735fb7e8a55d5476000cd5e8f8377
+csqtt-core-2.5.3-openwrt-25.12.5-sunxi-cortexa7-arm_cortex-a7_neon-vfpv4.apk | core | 2.5.3-r5 | 25.12.5 | arm_cortex-a7_neon-vfpv4 | apk/apk | 10322404 | 41cd7dada0f492613ed5641ce7395363b8265be6635e1b716ab54f822d662fd3
+csqtt-core-2.5.3-openwrt-25.12.5-x86-64-x86_64.apk | core | 2.5.3-r5 | 25.12.5 | x86_64 | apk/apk | 11975602 | 6f4da14d7b5fdae7c4bc85767a30527501fa8b88cd2cd28e6faf1e62dd3c6d59
+csqtt-core-2.5.3-openwrt-snapshot-mediatek-filogic-aarch64_cortex-a53.apk | core | 2.5.3-r5 | snapshot | aarch64_cortex-a53 | apk/apk | 11198584 | a34b520a7a2f8d41bcacd3160203fb1c77661716e51ea5e43cdaff47d7a1e146
+csqtt-linux-amd64 | - | - | - | - | file | 11465136 | 9cc65301ef4c4301a6e6bfa112096579176b27cc0e7dd8a9a0a0e6503ccacd7d
+csqtt-linux-arm64 | - | - | - | - | file | 9384256 | 599e26477d74e2979632fda09a17dc13256f78d133953f00a8b49b5c2055f88b
+csqtt-linux-armv7 | - | - | - | - | file | 8593280 | 9c2c6ec767572d7acac9d8f8a327684bbf52acaa030e4e8f6fc96a9156ca05a1
+csqtt-server-linux-amd64-2.1.9 | - | - | - | - | file | 9917072 | 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3
+install-csqtt.sh | - | - | - | - | file | 77118 | e515ba67a6dc15ce918977278d78961b4a8053afffb9c525425860a8baaec354
+install-router.sh | - | - | - | - | file | 4357 | 0ebcd6b295b3c950fc31d347b3d19cc78597f2319d2fb94181d8fd3f73651c2b
+install-server.sh | - | - | - | - | file | 3072 | 29bf6d254003ca9243d308e9273399bc8d896ff0aa5dd41dd4d07ea17c528f3f
+installer-release.conf.example | - | - | - | - | file | 957 | afb7385155fa8ea148e785c54096ee61c8d0c7b6cf60408b6627f181fd3620e4
+LICENSE | - | - | - | - | file | 4606 | 6e7ec80e4ffc89721734ae73357cca18f4cab7beacfdbb4b5ed8cb0b75672730
+luci-app-csqtt-2.5-openwrt-24.10.8-all.ipk | panel | 2.5-r24 | 24.10.8 | all | ipk/opkg | 164175 | 5e5bead12dc66243d424528e8dbc64f20156572062419185bcd9f959aa3dcb9b
+luci-app-csqtt-2.5-openwrt-25.12.5-all.apk | panel | 2.5-r24 | 25.12.5 | all | apk/apk | 163382 | c7df94904512cb502bccf2cad4f0bc9308280cf5aa16079df416a0c639b79380
+luci-app-csqtt-2.5-openwrt-snapshot-all.apk | panel | 2.5-r24 | snapshot | all | apk/apk | 163382 | c7df94904512cb502bccf2cad4f0bc9308280cf5aa16079df416a0c639b79380
+NOTICE.md | - | - | - | - | file | 3137 | d804c393d48a3ae4ef26ac6790b978127aba7b16667c8b1226e4591ca2f7d674
+README.md | - | - | - | - | file | 13121 | 48585ab3acf1e220383d741618712a5d2a9732d9a02f8f7483841be64ec3ef48
+server-install.sh | - | - | - | - | file | 65040 | abe5f1f4f2670ea0ed190d6935e2aba4e93e0641c6d8a61abc31e20ca0bf18f6
+SERVER-MANIFEST.txt | - | - | - | - | file | 680 | ec2b8dbc1190178d29accb51b654947498bbf7c02374a91cc822f82463659e09
+SERVER-NOTICE.md | - | - | - | - | file | 3523 | a58b70f8b4c3b6ab5f82335071ebae44da5c2a3d71466ee6772c67e37ebc9e0d
+SERVER-README.md | - | - | - | - | file | 3967 | 1b92d5f90e0e4f87af6a055bafbd976908dadbd6e7bd5dda96b18138008faac2

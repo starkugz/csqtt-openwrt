@@ -17,7 +17,7 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Доп�
 и архитектуре роутера.
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" --menu
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
 Для загрузки публичных пакетов аккаунт GitHub не нужен. Установщик проверяет
@@ -60,7 +60,7 @@ f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-op
 Выполните по SSH на VPS от `root` для открытия меню выбора сервера.
 
 ```sh
-f=$(mktemp) && curl -fLsS -o "$f" https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/install-server.sh && sh "$f" --menu
+curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh
 ```
 
 Требования и настройка после запуска описаны в

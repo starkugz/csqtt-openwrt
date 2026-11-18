@@ -60,7 +60,11 @@ stage_asset() {
     else
         curl --fail --silent --show-error --location --proto '=https' \
             --proto-redir '=https' --connect-timeout 15 --max-time 180 \
-            --output "$work/$1" "$base/$1"
+            --output "$work/$1" "$(if [ "$1" = "$backend" ]; then
+                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/server-install.sh'
+            else
+                printf '%s' "$base/$1"
+            fi)"
     fi
     printf '%s  %s\n' "$2" "$work/$1" | sha256sum -c - >&2
 }

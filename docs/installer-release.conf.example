@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 amurcanov
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+#
+# [051] Единая конфигурация выпуска для openwrt/install-csqtt.sh.
+# Скопируйте этот файл в openwrt/installer-release.conf и задайте точный тег
+# выпуска. Пока tag пуст, установщик честно отвечает RELEASE_BLOCKED (код 60):
+# URL не выдумывается, latest не запрашивается (тег определяется на этапе 056).
+#
+# Значения ниже можно переопределить переменными окружения с теми же именами.
+
+CSQTT_RELEASE_OWNER=starkugz
+CSQTT_RELEASE_REPO=csqtt-openwrt
+CSQTT_RELEASE_TAG=
+
+# Явное зеркало или локальный стенд вместо GitHub Releases (необязательно).
+# CSQTT_RELEASE_BASE_URL=http://127.0.0.1:8080

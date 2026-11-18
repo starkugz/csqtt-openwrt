@@ -1,4 +1,24 @@
 #!/bin/sh
+case "${1:---menu}" in
+2.0) ;;
+*)
+    choice=${1:---menu}
+    [ "$#" -eq 0 ] || shift
+    case "$choice" in
+      --menu) set -- install --menu "$@" ;;
+      2.5) set -- install --set panel "$@" ;;
+      *) echo "Использование: install-openwrt.sh [--menu|2.0|2.5]" >&2; exit 2 ;;
+    esac
+    f=$(mktemp) || exit 1
+    trap 'rm -f "$f"' EXIT
+    wget -T 30 -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh || exit 1
+    printf '%s  %s
+' '6c954e5660237c7ed467352c27370cda408a037ffbd9c2f5b20ae76d1908b42d' "$f" | sha256sum -c - || exit 1
+    sh "$f" "$@"
+    exit $?
+    ;;
+esac
+#!/bin/sh
 # SPDX-FileCopyrightText: 2026 amurcanov
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 set -eu

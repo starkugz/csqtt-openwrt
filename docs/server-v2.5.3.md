@@ -15,7 +15,7 @@
 и запустите меню на сервере.
 
 ```sh
-f=$(mktemp) && curl -fLsS -o "$f" https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3/install-server.sh && sudo sh "$f" --menu
+curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh
 ```
 
 В меню можно установить 2.1.9 или 2.5.3, удалить службу с сохранением

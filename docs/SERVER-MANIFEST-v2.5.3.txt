@@ -1,0 +1,13 @@
+# CSQTT 2.5.3 server kit
+source-commit: 9a2ccb808494007157e5443676579de8a2b8ec20
+source-dir: server-2.5.3/rust-server (patched chain)
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+targets: x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
+linker: musl-cross gcc 11.2.1 (/root/build/*-cross), link-self-contained=no
+date: 2026-11-09T15:37:25+03:00
+
+legacy-version: 2.1.9
+legacy-asset: csqtt-server-linux-amd64-2.1.9
+legacy-source: https://github.com/starkugz/csqtt-openwrt/releases/download/v2.0/csqtt-server-linux-amd64-2.1.9
+legacy-sha256: 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3

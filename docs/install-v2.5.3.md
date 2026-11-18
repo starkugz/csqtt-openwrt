@@ -30,7 +30,7 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 Выполните на роутере по SSH от root. Выберите ядро с панелью, только ядро или только панель.
 
 ```sh
-f=$(mktemp) && wget -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install-openwrt.sh && sh "$f" --menu
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
 Для выбора версии панели без ядра см. [команды для панели](../README.md#только-панель-luci). Установщик определяет
@@ -171,3 +171,7 @@ csqtt log tail -n 50
 Перед установкой проверьте свободное место в `/overlay` и `/tmp`.
 Для ядра и панели нужен примерно 27 МиБ свободного места в `/overlay`
 при первой установке и 51 МиБ при обновлении.
+
+## Настройка источника пакетов
+
+Пример настроек — [installer-release.conf.example](installer-release.conf.example).
