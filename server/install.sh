@@ -61,7 +61,7 @@ stage_asset() {
         curl --fail --silent --show-error --location --proto '=https' \
             --proto-redir '=https' --connect-timeout 15 --max-time 180 \
             --output "$work/$1" "$(if [ "$1" = "$backend" ]; then
-                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/server/backend.sh'
+                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/71f29d32498e53bea0d69e6a6598ac1876333feb/server/backend.sh'
             else
                 printf '%s' "$base/$1"
             fi)"
