@@ -1331,9 +1331,11 @@ menu_select() {
 	case "$ACTION" in
 	install | update | uninstall) printf '  %s) удалить\n' "$_menu_del" >&2 ;;
 	esac
+	printf '  0) отмена\n' >&2
 	printf '> ' >&2
 	read -r _menu_ans || _menu_ans=""
 	case "$_menu_ans" in
+	0) exit 0 ;;
 	1)
 		INSTALL_SET="both"
 		CORE_VERSION=2.5.3
