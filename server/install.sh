@@ -45,6 +45,31 @@ case "$(uname -s):$(uname -m):$version" in
     *) die 'Для выбранной версии и архитектуры нет серверного пакета.' ;;
 esac
 
+# Проверяем инструменты до загрузки файлов; пакеты и службы здесь не меняем.
+missing=
+require_tool() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        missing="${missing}${missing:+, }$1"
+    fi
+}
+for tool in bash curl sha256sum; do require_tool "$tool"; done
+if [ "$version" != uninstall ]; then
+    require_tool "${CSQTT_INSTALL_SYSTEMCTL:-systemctl}"
+    require_tool "${CSQTT_INSTALL_IP:-ip}"
+    require_tool "${CSQTT_INSTALL_SS:-ss}"
+    require_tool "${CSQTT_INSTALL_SYSCTL:-sysctl}"
+    for tool in python3 tar od; do require_tool "$tool"; done
+    no_nat=0
+    for arg in "$@"; do [ "$arg" != --no-nat ] || no_nat=1; done
+    if [ "$no_nat" -eq 0 ]; then require_tool "${CSQTT_INSTALL_IPTABLES:-iptables}"; fi
+fi
+if [ -n "$missing" ]; then
+    printf 'Не хватает обязательных утилит: %s. Файлы не скачивались, служба не менялась.\n' "$missing" >&2
+    printf '%s\n' 'Debian/Ubuntu, от root: apt-get update && apt-get install -y bash curl ca-certificates coreutils python3 tar procps iproute2 iptables' >&2
+    printf '%s\n' 'Для другой системы установите соответствующие пакеты её менеджером. Требуется Linux с systemd и /dev/net/tun. Затем повторите команду.' >&2
+    exit 66
+fi
+
 base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/b7afa632a97e0d79aa7ee581ee4e698c87fd945f/server/v2.5.3
 backend=server-install.sh
 backend_sha=abe5f1f4f2670ea0ed190d6935e2aba4e93e0641c6d8a61abc31e20ca0bf18f6

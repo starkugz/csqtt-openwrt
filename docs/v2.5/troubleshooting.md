@@ -9,13 +9,17 @@
 | Симптом | Возможная причина | Безопасная проверка | Действие |
 |---|---|---|---|
 | Служба «не запущена» | `main.enabled='0'` или нет автозапуска | `uci get csqtt.main.enabled`; `ls /etc/rc.d/*csqtt*` | `uci set csqtt.main.enabled='1'; uci commit csqtt; service csqtt enable; service csqtt start` |
-| Профиль выключен, соединения нет | профиль `enabled='0'` | `uci show csqtt` | включить профиль в панели или `uci set csqtt.<id>.enabled='1'; uci commit csqtt` |
+| Профиль выключен, соединения нет | профиль `enabled='0'` | `uci -q get csqtt.<id>.enabled` | включить профиль в панели или `uci set csqtt.<id>.enabled='1'; uci commit csqtt` |
 | Нет интерфейса `csqtt0` | служба не запущена или TUN не поднялся | `ip -4 addr show csqtt0` | проверьте службу; `csqtt doctor` |
 | Туннель есть, трафика нет | нет привязки прокси к `csqtt0`, либо правила клиента | `curl --interface csqtt0 --max-time 15 https://1.1.1.1/cdn-cgi/trace` | настройте выход клиента с `interface-name: csqtt0` ([совместимость](compatibility.md)) |
 | Ошибка авторизации VK / Flood | токен недействителен, истёк/отозван, не тот аккаунт; или Flood | `csqtt status` → последняя ошибка; поле **Токен доступа VK** | получить новый токен или использовать `vkcalls` с VK-хешами. **Не запускайте повторные авторизации сериями** |
 | Нет соединения при живом сервисе | профиль не соответствует выданной ссылке | `csqtt doctor` | сверьте `host:port` и пароль с выданной ссылкой; `profile use <id>` |
 | Периодические тайм-ауты | неподходящие `obfs`/`workers` | — | подберите `obfs` (`audio`/`video`) и `workers` (2.1.9: 9..126 с шагом 9; 2.5.x: 10..100 с шагом 10) по рекомендации владельца сервера |
 | Ядро недоступно в панели | пакет этого ядра не установлен | `ls /usr/bin/csqtt-*` | установите нужное ядро или выберите доступный движок; подмены ядра нет |
+
+`uci show csqtt`, `uci export csqtt` и файл `/etc/config/csqtt` могут содержать
+пароли, токены и другие секреты. Не отправляйте их целиком в чат, issue или
+публичный журнал. Для проверки используйте точечные команды ниже.
 
 ## Основные команды
 
@@ -25,13 +29,13 @@ csqtt doctor                 # read-only: конфиг, TUN, peer, rp_filter
 csqtt doctor --pre-launch
 csqtt log tail -n 80 -f      # журнал с маскировкой секретов
 logread | grep csqtt         # системный журнал
-uci show csqtt
+uci -q get csqtt.main.enabled
 ```
 
 ## Восстановление
 
 1. Остановите службу: `service csqtt stop`.
-2. Проверьте конфигурацию: `uci show csqtt`; при подозрении на повреждение
+2. Сверьте настройки в LuCI; при подозрении на повреждение
    восстановите `/etc/config/csqtt` из резервной копии (создаётся при установке
    и обновлении, права `0600`).
 3. Запустите снова: `service csqtt start`, затем `csqtt doctor`.
