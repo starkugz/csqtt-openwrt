@@ -16,7 +16,9 @@
 #   * health-check и автоматический откат при провале.
 #
 # Границы:
-#   * Инструмент не читает, не печатает и не передаёт секреты конфигурации:
+#   * Секреты существующей конфигурации не читаются и не печатаются.
+#     Новые web-данные создаются в env 0600 и показываются только терминалу.
+#     Остальная конфигурация:
 #     каталог конфигурации копируется/восстанавливается как есть.
 #   * Замена только бинарника в уже развёрнутом окружении — server-deploy.sh;
 #     здесь `update` дополнительно приводит unit и хелперы к текущему виду.
@@ -97,6 +99,10 @@ RESTORE_CONFIG=0
 
 LOG_FILE=""
 LOCK_FILE=""
+NEW_WEB_CREDENTIALS=0
+GENERATE_WEB_CREDENTIALS=0
+NEW_WEB_USER=""
+NEW_WEB_PASS=""
 
 log() {
 	local msg="$*"
@@ -349,8 +355,10 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
   --force               Выполнить установку, даже если хеш уже совпадает.
   --help, -h            Эта справка.
 
-Секреты (пароли, токены, ключи) не читаются, не печатаются и не передаются в
-аргументах. Резервные копии создаются с правами 0700, файлы — 0600.
+Секреты существующей конфигурации не выводятся. При новой установке web-логин
+и пароль сохраняются в env-файле 0600 и показываются только в терминале.
+В журнал установщика и аргументы процесса они не передаются.
+Резервные копии создаются с правами 0700, файлы — 0600.
 EOF
 }
 
@@ -508,7 +516,38 @@ guard_ownership() {
 	return 0
 }
 
+# TCP-порт панели проверяем до записи файлов и остановки службы.
+check_web_port() {
+    local listeners pids pid
+    [ "$NO_WEB" -eq 0 ] && [ "${WEB_PORT:-0}" != 0 ] || return 0
+    if ! listeners=$("$SS_BIN" -H -ltnp "sport = :$WEB_PORT" 2>/dev/null); then
+        err "не удалось проверить TCP/$WEB_PORT через ss; установка остановлена"
+        return 1
+    fi
+    [ -n "$listeners" ] || return 0
+    pids=$(printf '%s\n' "$listeners" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -un || true)
+    if [ -z "$pids" ]; then
+        err "TCP/$WEB_PORT занят, владелец неизвестен; выберите другой --web-port"
+        FOREIGN_BLOCK=1
+        return 1
+    fi
+    for pid in $pids; do
+        if ! pid_belongs_to_instance "$pid"; then
+            err "TCP/$WEB_PORT занят чужим процессом (PID $pid); выберите другой --web-port"
+            FOREIGN_BLOCK=1
+            return 1
+        fi
+    done
+}
+
 # --- предварительная проверка --------------------------------------------
+
+legacy_server_selected() {
+    local file="${CANDIDATE:-$TARGET_BIN}"
+    [ -f "$file" ] || return 1
+    # Exact published original 2.1.9 payload: its CLI has no extended flags.
+    [ "$(sha256_of "$file")" = 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3 ]
+}
 
 preflight_check() {
 	local fail=0 hm cm magic sha actual
@@ -589,12 +628,27 @@ preflight_check() {
 		fi
 	fi
 
+    if legacy_server_selected; then
+        if [ "$INSTANCE" != csqtt ] || [ "$IFACE" != csqtt1 ] || { [ -n "$TUN_ADDR" ] && [ "$TUN_ADDR" != 10.66.67.1/24 ]; } || [ "$SUBNET" != 10.66.67.0/24 ] || [ "$NO_NAT" -ne 0 ] || [ "$NO_WEB" -ne 0 ] || [ -n "$DESIRED" ]; then
+            err "Оригинальный сервер 2.1.9 не поддерживает --instance/--iface/--tun-addr/--no-nat/--no-web/--desired. Нужны стандартный экземпляр csqtt, csqtt1 и 10.66.67.1/24; версия автоматически не заменяется"
+            fail=1
+        fi
+    fi
+	if ! check_web_port; then fail=1; fi
+
 	# Чужой процесс на UDP-порту peer или непонятное владение — блокировка.
 	# Свой прежний процесс допустим: служба будет перезапущена, tun-recover
 	# освободит только свой порт.
 	if ! guard_ownership; then
 		FOREIGN_BLOCK=1
 		fail=1
+	fi
+	if ! "$SS_BIN" -H -lun "sport = :$PEER_PORT" >/dev/null 2>&1; then
+		err "не удалось проверить UDP/$PEER_PORT через ss"
+		fail=1
+	fi
+	if [ "$fail" -eq 0 ]; then
+		ok "Порты проверены: UDP/$PEER_PORT; TCP/$WEB_PORT (если web включён). Чужих слушателей нет"
 	fi
 
 	return "$fail"
@@ -909,7 +963,8 @@ SYSCTLEOF
 }
 
 unit_content() {
-	local start="ExecStart=$TARGET_BIN --listen 0.0.0.0:$PEER_PORT --config-dir $CONFIG_DIR"
+	local start="ExecStart=$TARGET_BIN --listen 0.0.0.0:$PEER_PORT --config-dir $CONFIG_DIR" legacy=0
+    legacy_server_selected && legacy=1
 	if [ "$NO_WEB" -eq 1 ]; then
 		start="$start --no-web"
 	else
@@ -921,7 +976,7 @@ unit_content() {
 	if [ "$IFACE" != "csqtt1" ]; then
 		start="$start --iface $IFACE"
 	fi
-	if [ -n "$TUN_ADDR" ]; then
+	if [ -n "$TUN_ADDR" ] && [ "$legacy" -eq 0 ]; then
 		start="$start --tun-addr $TUN_ADDR"
 	fi
 	if [ "$NO_NAT" -eq 1 ]; then
@@ -970,11 +1025,39 @@ write_file_atomic() { # путь, права, содержимое(stdin)
 	mv -f -- "$tmp" "$path"
 }
 
+prepare_new_web_credentials() {
+    [ "$GENERATE_WEB_CREDENTIALS" -eq 1 ] || return 0
+    [ ! -e "$ENV_FILE" ] || return 0
+    NEW_WEB_USER="csqtt_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
+    NEW_WEB_PASS=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+    printf 'CSQTT_WEB_USER=%s\nCSQTT_WEB_PASS=%s\n' "$NEW_WEB_USER" "$NEW_WEB_PASS" |
+        write_file_atomic "$ENV_FILE" 0600
+    NEW_WEB_CREDENTIALS=1
+}
+
+show_web_access() {
+    local panel_host
+    [ "$NO_WEB" -eq 0 ] || return 0
+    if [ "$NEW_WEB_CREDENTIALS" -eq 1 ]; then
+        # Direct terminal output only: never pass credentials to log()/emit().
+        if [ -t 2 ]; then
+            panel_host=$("$IP_BIN" -o -4 addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/");print a[1]}') || panel_host=''
+            panel_host=${panel_host:-<IP-VPS>}
+            printf '\nВход в веб-панель: https://%s:%s/\nЛогин: %s\nПароль: %s\n' "$panel_host" "$WEB_PORT" "$NEW_WEB_USER" "$NEW_WEB_PASS" >&2
+            printf '%s\n' 'Если VPS за NAT, используйте внешний адрес и проброшенный порт.' >&2
+        fi
+        ok "Новые данные входа сохранены в $ENV_FILE (0600); в журнал установщика не записаны"
+    else
+        ok "Настройки существующей конфигурации не заменялись; данные входа не выводятся"
+    fi
+}
+
 install_service_files() {
 	step "Укладка бинарника, хелперов и unit"
 	mkdir -p "$(dirname "$TARGET_BIN")" "$LIB_DIR" "$CONFIG_DIR" "$SYSCTL_DIR" "$(dirname "$UNIT_PATH")" "$RUNTIME_DIR"
 	chmod 0755 "$(dirname "$TARGET_BIN")" "$LIB_DIR" 2>/dev/null || true
 	chmod 0700 "$CONFIG_DIR" 2>/dev/null || true
+	prepare_new_web_credentials
 	if [ -n "$DESIRED" ]; then
 		mkdir -p "$(dirname "$DESIRED")"
 	fi
@@ -1307,6 +1390,7 @@ auto_rollback() {
 	local bdir="$1"
 	warn "health-check не пройден — автоматический откат к предыдущему состоянию"
 	if rollback_to_backup "$bdir" no; then
+		if [ "$NEW_WEB_CREDENTIALS" -eq 1 ]; then rm -f -- "$ENV_FILE"; fi
 		ok "Предыдущее состояние восстановлено: $bdir"
 		emit "CSQTT_SERVER_INSTALL_ROLLED_BACK|$bdir"
 		exit "$EX_ACTIVATION"
@@ -1363,6 +1447,9 @@ cmd_install() {
 	confirm "Установить/обновить сервер CSQTT ($SERVICE) и запустить службу?"
 
 	take_lock
+    if [ "$NO_WEB" -eq 0 ] && [ ! -e "$TARGET_BIN" ] && [ ! -e "$CONFIG_DIR" ]; then
+        GENERATE_WEB_CREDENTIALS=1
+    fi
 	bdir=$(make_backup "$mode")
 	step "Резервная копия создана: $bdir"
 
@@ -1377,6 +1464,7 @@ cmd_install() {
 	step "Проверка запуска и здоровья"
 	if wait_health; then
 		record_current "$bdir" "$cand_sha"
+		show_web_access
 		ok "Установка завершена: служба активна, проверки пройдены"
 		ok "Откат при необходимости: $TOOL_NAME rollback --backup $bdir"
 		emit "CSQTT_SERVER_INSTALL_OK|$SERVICE|$cand_sha"
