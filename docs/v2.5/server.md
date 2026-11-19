@@ -10,18 +10,20 @@
 | 2.5.3 | x86-64, AArch64, ARMv7 |
 | 2.1.9 | x86-64, оригинальный бинарник amurcanov из выпуска [v2.0](https://github.com/starkugz/csqtt-openwrt/releases/tag/v2.0) |
 
-Выполните команду на VPS, чтобы открыть меню установки.
+Выполните команду на VPS от root, чтобы открыть меню установки.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sh
 ```
+
+Если вы вошли обычным пользователем и используете `sudo`, замените `| sh` на `| sudo sh`.
 
 В меню можно установить 2.1.9 или 2.5.3, удалить службу с сохранением
 данных или отменить действие. Для предварительной проверки выберите
 версию напрямую и добавьте `--dry-run`.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh -s -- 2.5.3 --dry-run
+curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sh -s -- 2.5.3 --dry-run
 ```
 
 Установщик проверяет SHA-256 выбранного ELF и скрипта развёртывания.

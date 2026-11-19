@@ -74,7 +74,7 @@ verify_file() {
 }
 
 verify_file "$core" && verify_file "$panel" &&
-    apk update && apk add --allow-untrusted "./$core" "./$panel"
+    apk update && apk add --allow-untrusted --force-non-repository "./$core" "./$panel"
 ```
 
 Для одного компонента проверьте и передайте в apk только его файл.

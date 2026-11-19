@@ -37,11 +37,13 @@ wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/in
 
 ## Сервер Linux / VPS
 
-Выполните на Linux с systemd. Установщик предложит подходящую версию сервера.
+Выполните от root на Linux с systemd. Установщик предложит подходящую версию сервера.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | sh
 ```
+
+Если вы вошли обычным пользователем и используете `sudo`, замените `| sh` на `| sudo sh`.
 
 [Инструкция OpenWrt](docs/v2.5/install.md) ·
 [Инструкция VPS](docs/v2.5/server.md) ·
