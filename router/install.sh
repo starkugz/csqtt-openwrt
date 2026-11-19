@@ -10,13 +10,58 @@ umask 077
 # тянуть LuCI. Хук получает точный набор и либо ставит недостающие пакеты,
 # либо отказывается (код 66) — тогда на устройстве ничего не меняется.
 run_installer() {
-    CSQTT_RELEASE_OWNER=starkugz CSQTT_RELEASE_REPO=csqtt-openwrt \
+    PATH="$work/compat:$PATH" CSQTT_RELEASE_OWNER=starkugz CSQTT_RELEASE_REPO=csqtt-openwrt \
         CSQTT_RELEASE_TAG=v2.5.3 CSQTT_RELEASE_BASE_URL="$base" \
         CSQTT_DEP_HOOK="$work/dep-hook.sh" \
         CSQTT_DEP_STATE="$work/dep-state" \
         CSQTT_DEP_CACHE="$work/apk-cache" \
         CSQTT_DEP_YES="$assume_yes" \
         sh "$work/install-csqtt.sh" "$@"
+}
+
+# OpenWrt wget may be uclient-fetch and have no GNU -t/--tries option.
+# Scope the adapter to this child run; installed files and system wget stay intact.
+write_wget_compat() {
+    CSQTT_COMPAT_WGET=$(command -v wget)
+    export CSQTT_COMPAT_WGET
+    mkdir -p "$work/compat"
+    cat >"$work/compat/wget" <<'WGET'
+#!/bin/sh
+set -eu
+real=${CSQTT_COMPAT_WGET:?}
+remaining=$#
+while [ "$remaining" -gt 0 ]; do
+    case "$1" in
+        -t|--tries)
+            [ "$remaining" -ge 2 ] || exit 2
+            shift 2
+            remaining=$((remaining - 2))
+            ;;
+        -t[0-9]*|--tries=*)
+            shift
+            remaining=$((remaining - 1))
+            ;;
+        *)
+            arg=$1
+            shift
+            set -- "$@" "$arg"
+            remaining=$((remaining - 1))
+            ;;
+    esac
+done
+if "$real" "$@"; then
+    exit 0
+else
+    rc=$?
+    case "$*" in
+        *https://github.com/*/releases/download/*)
+            printf 'Не удалось скачать файл выпуска с GitHub. Доступ к raw.githubusercontent.com не гарантирует доступ к github.com. Проверьте доступ к GitHub через текущую сеть и повторите установку.\n' >&2
+            ;;
+    esac
+    exit "$rc"
+fi
+WGET
+    chmod 0700 "$work/compat/wget"
 }
 
 # Хук зависимостей для apk: opkg разрешает зависимости сам, там хук молчит.
@@ -120,6 +165,7 @@ install_router() {
         fi
     fi
     write_dep_hook
+    write_wget_compat
     run_installer "$@"
 }
 
