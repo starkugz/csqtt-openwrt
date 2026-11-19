@@ -4,7 +4,7 @@ install_csqtt() (
     set -eu
     umask 077
     legacy_download=0
-    base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/4446b976825a421eb9d59d2296b726aa41c22cb4
+    base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/a28f5e1f3253b730ea4fc81855587a40789b8946
     if [ -f /etc/openwrt_release ]; then
         installer=router/install.sh
         sha=7ef72d89458a3b040e06628a0ac56d8491dd3fddadb08f14b9678ceb2cbdd90a
@@ -43,7 +43,7 @@ install_csqtt() (
         esac
     else
         installer=server/install.sh
-        sha=03d7956de0c81bbef253f23d4a48efecc59b8f529797db50618d60dbfffcc26c
+        sha=3a5cd8a91dc99b2b14c3bd372ea3e560315fb51152e4be6ece1fae84bbd09c75
         platform=VPS
         [ "$#" -gt 0 ] || set -- --menu
     fi
