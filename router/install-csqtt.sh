@@ -82,6 +82,7 @@ ASSUME_YES=0
 PURGE=0
 MENU=0
 NO_RESTART=0
+KEEP_STOPPED=0
 BACKUP_ARG=""
 RELEASE_CONF="${CSQTT_INSTALLER_RELEASE_CONF:-$SCRIPT_DIR/installer-release.conf}"
 # [063/2] Привязка установки к завершённой проверке: панель передаёт точный
@@ -128,13 +129,31 @@ die() {
 
 cleanup() {
 	if [ "$LOCKED" -eq 1 ]; then
-		rmdir "$LOCK" 2>/dev/null || true
+		# [r38] внутри блокировки лежит pid: rmdir не удаляет непустой каталог
+		# и оставлял бы ложную занятость после каждого запуска.
+		rm -rf "$LOCK" 2>/dev/null || true
+		LOCKED=0
 	fi
 	rm -rf "$WORK"
 	rm -f "$TMPBASE/csqtt-release.$$.json" 2>/dev/null || true
 	rm -f "$TMPBASE/csqtt-notes.$$.json" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
+# [r38] SIGTERM/SIGINT должны завершать установщик, а не только очищать
+# временные файлы: прежний trap возвращал управление, `timeout` ждал дальше,
+# и задание обновления оставалось «выполняется» навсегда.
+on_exit() {
+	_oe_rc=$?
+	cleanup
+	exit "$_oe_rc"
+}
+on_signal() {
+	cleanup
+	exit "$1"
+}
+trap on_exit EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 usage() {
 	cat <<'EOF'
@@ -168,6 +187,8 @@ usage() {
   --dry-run              проверить и показать план, ничего не менять
   --purge                при uninstall удалить /etc/config/csqtt и состояние
   --no-restart           не перезапускать службу после изменения
+  --keep-stopped         остановить службу перед удалением и оставить её
+                         остановленной (postrm не поднимет оставшееся ядро)
   --release-conf PATH    файл конфигурации выпуска
   --backup DIR           снимок для rollback (по умолчанию последний)
   --help, -h             эта справка
@@ -220,6 +241,7 @@ parse_args() {
 		--purge) PURGE=1 ;;
 		--menu) MENU=1 ;;
 		--no-restart) NO_RESTART=1 ;;
+		--keep-stopped) KEEP_STOPPED=1 ;;
 		--release-conf)
 			[ "$#" -ge 2 ] || die "для --release-conf нужен путь" "$EX_USAGE"
 			RELEASE_CONF="$2"
@@ -373,17 +395,21 @@ discover_release_tag() {
 	fetch "${API_BASE}/repos/$OWNER/$REPO/releases/latest" "$_dt_json"
 	_dt_rc=$?
 	if [ "$_dt_rc" -ne 0 ]; then
-		# 404/HTTP-ошибка сервера: выпуска нет; иначе сеть/API недоступны.
-		# wget возвращает 8, curl — 22; тело 404 может содержать message.
+		# Подтверждённый HTTP-ответ (FETCH_ERR=http): выпуска нет или он
+		# скрыт. Иначе сеть/API недоступны; тело 4xx может содержать message.
 		_dt_body=""
 		[ -s "$_dt_json" ] && _dt_body=$(cat "$_dt_json" 2>/dev/null || true)
 		case "$_dt_rc" in
 		8 | 22) DISCOVER_STATE=not_published ;;
 		*)
-			case "$_dt_body" in
-			*'"Not Found"'* | *'"message"'*) DISCOVER_STATE=not_published ;;
-			*) DISCOVER_STATE=api_unreachable ;;
-			esac
+			if [ "$FETCH_ERR" = "http" ]; then
+				DISCOVER_STATE=not_published
+			else
+				case "$_dt_body" in
+				*'"Not Found"'* | *'"message"'*) DISCOVER_STATE=not_published ;;
+				*) DISCOVER_STATE=api_unreachable ;;
+				esac
+			fi
 			;;
 		esac
 		rm -f "$_dt_json"
@@ -488,31 +514,216 @@ require_release() {
 
 # --- сеть ------------------------------------------------------------------
 
-fetch() { # fetch URL OUT
-	_fetch_rc=1
-	if command -v uclient-fetch >/dev/null 2>&1; then
-		if uclient-fetch -T 15 -q -O "$2" "$1"; then
-			return 0
-		else
-			_fetch_rc=$?
-		fi
+# [D1] Загрузчик. Минимальные требования: один из uclient-fetch, wget
+# (BusyBox/GNU) или curl; опции -t/--tries не используются, потому что на
+# штатном OpenWrt /usr/bin/wget — симлинк на uclient-fetch, который их не
+# понимает. Тайм-ауты (-T/--connect-timeout/--max-time) и проверка TLS
+# сохраняются. Результат попытки классифицируется в FETCH_ERR:
+#   http    — сервер ответил HTTP-ошибкой (4xx/5xx), код не выдумывается;
+#   tls     — не прошла проверка сертификата/рукопожатие;
+#   network — нет связи, DNS или тайм-аут;
+#   nodl    — нет ни одного инструмента скачивания.
+# Пустой FETCH_ERR при успехе. Ни одна неудача не выдаётся за HTTP 404.
+FETCH_ERR=""
+FETCH_DETAIL=""
+FETCH_TOOL=""
+
+# Подтверждённый код HTTP из текста ошибки (BusyBox/GNU wget, uclient-fetch).
+fetch_http_code() { # MSG -> 404|403|5xx|пусто
+	printf '%s\n' "$1" |
+		grep -oE '(HTTP/[0-9.]+|HTTP error|[Ee]rror|ERROR|server returned)[^0-9]{0,6}[45][0-9][0-9]' 2>/dev/null |
+		grep -oE '[45][0-9][0-9]' | head -n 1
+}
+
+fetch_classify() { # TOOL RC MESSAGE
+	_kind=""
+	case "$1:$2" in
+	uclient-fetch:8 | wget:8 | curl:22) _kind=http ;;
+	uclient-fetch:5 | curl:35 | curl:51 | curl:58 | curl:59 | curl:60) _kind=tls ;;
+	uclient-fetch:4 | uclient-fetch:6 | uclient-fetch:7 | curl:6 | curl:7 | curl:28) _kind=network ;;
+	*)
+		case "$3" in
+		*"HTTP error"* | *"HTTP/"*" 4"* | *"HTTP/"*" 5"* | *"ERROR 4"* | *"ERROR 5"* | *"server returned"*)
+			_kind=http
+			;;
+		*[Cc]ertificate* | *SSL* | *TLS*) _kind=tls ;;
+		*) _kind=network ;;
+		esac
+		;;
+	esac
+	# Подтверждённый ответ сервера информативнее сетевой ошибки другой
+	# попытки: не понижаем http/tls до network. Код ответа сохраняется, даже
+	# если http уже был подтверждён предыдущей попыткой.
+	if [ "$_kind" = http ]; then
+		_code=$(fetch_http_code "$3")
+		[ -n "$_code" ] && [ -z "$FETCH_DETAIL" ] && FETCH_DETAIL=$_code
 	fi
-	if command -v wget >/dev/null 2>&1; then
-		if wget -T 30 -t 1 -q -O "$2" "$1"; then
-			return 0
-		else
-			_fetch_rc=$?
+	case "$FETCH_ERR:$_kind" in
+	http:*) return 0 ;;
+	*:http | *:tls) FETCH_ERR=$_kind ;;
+	nodl:*) FETCH_ERR=$_kind ;;
+	*:network) [ -n "$FETCH_ERR" ] || FETCH_ERR=network ;;
+	*) FETCH_ERR=$_kind ;;
+	esac
+	return 0
+}
+
+fetch_try() { # fetch_try TOOL ARGS...
+	_fetch_tool=$1
+	shift
+	: >"$FETCH_ERRFILE" 2>/dev/null || true
+	fetch_hard "$@" 2>"$FETCH_ERRFILE"
+	_fetch_rc=$?
+	[ "$_fetch_rc" -eq 0 ] && return 0
+	_fetch_msg=""
+	[ -s "$FETCH_ERRFILE" ] && _fetch_msg=$(tr '\n' ' ' <"$FETCH_ERRFILE" 2>/dev/null || true)
+	FETCH_TOOL=$_fetch_tool
+	fetch_classify "$_fetch_tool" "$_fetch_rc" "$_fetch_msg"
+	return "$_fetch_rc"
+}
+
+# Тот же бинарник под другим именем (на OpenWrt /usr/bin/wget — симлинк на
+# uclient-fetch). Повторять им загрузку бессмысленно: результат тот же.
+fetch_tool_id() { # fetch_tool_id TOOL -> путь бинарника
+	_fti_path=$(command -v "$1" 2>/dev/null) || return 1
+	[ -n "$_fti_path" ] || return 1
+	_fti_real=$(readlink -f "$_fti_path" 2>/dev/null) || _fti_real=""
+	[ -n "$_fti_real" ] || _fti_real=$_fti_path
+	printf '%s\n' "$_fti_real"
+}
+
+# Повторы только для сетевого сбоя и пустого ответа: подтверждённый HTTP/TLS
+# ответ повторять незачем. Число попыток ограничено (1–3).
+fetch_attempts() {
+	_fa=${CSQTT_FETCH_ATTEMPTS:-2}
+	case "$_fa" in '' | *[!0-9]*) _fa=2 ;; esac
+	[ "$_fa" -ge 1 ] || _fa=1
+	[ "$_fa" -le 3 ] || _fa=3
+	printf '%s\n' "$_fa"
+}
+
+# Жёсткий предел одной попытки: -T/--max-time самого загрузчика не спасают,
+# если зависла резолвинг-функция. timeout есть не везде (BusyBox без -k),
+# поэтому поддержка проверяется один раз; без неё остаются штатные тайм-ауты.
+fetch_hard() {
+	if command -v timeout >/dev/null 2>&1 &&
+		timeout -k 1 1 true >/dev/null 2>&1; then
+		timeout -k 2 45 "$@"
+	else
+		"$@"
+	fi
+}
+
+fetch_expired() {
+	[ "${_FETCH_STOP:-0}" -gt 0 ] || return 1
+	_now=$(date +%s 2>/dev/null) || return 1
+	[ -n "$_now" ] || return 1
+	[ "$_now" -ge "$_FETCH_STOP" ]
+}
+
+# Один загрузчик: до ATTEMPTS попыток, успех только при непустом OUT.
+# Дубликат уже испробованного бинарника пропускается.
+fetch_one() { # fetch_one TOOL ATTEMPTS OUT CMD...
+	_fo_tool=$1
+	_fo_n=$2
+	_fo_out=$3
+	shift 3
+	_fo_id=$(fetch_tool_id "$_fo_tool" 2>/dev/null) || _fo_id=""
+	if [ -n "$_fo_id" ]; then
+		case " $_FETCH_SEEN " in
+		*" $_fo_id "*) FETCH_TOOL=$_fo_tool; return 1 ;;
+		esac
+		_FETCH_SEEN="$_FETCH_SEEN $_fo_id"
+	fi
+	_fo_rc=1
+	_fo_i=1
+	while [ "$_fo_i" -le "$_fo_n" ]; do
+		fetch_expired && break
+		# Пустой файл до попытки: rc=0 без записанного тела — не успех.
+		rm -f "$_fo_out" 2>/dev/null || true
+		: >"$_fo_out" 2>/dev/null || true
+		fetch_try "$_fo_tool" "$@"
+		_fo_rc=$?
+		if [ "$_fo_rc" -eq 0 ]; then
+			[ -s "$_fo_out" ] && return 0
+			[ -n "$FETCH_ERR" ] || FETCH_ERR=empty
+			FETCH_TOOL=$_fo_tool
+			_fo_rc=1
 		fi
+		case "$FETCH_ERR" in
+		network | empty) ;;
+		*) return "$_fo_rc" ;;
+		esac
+		_fo_i=$((_fo_i + 1))
+		[ "$_fo_i" -le "$_fo_n" ] && { sleep 1 2>/dev/null || true; }
+	done
+	return "$_fo_rc"
+}
+
+fetch() { # fetch URL OUT
+	FETCH_ERR=""
+	FETCH_DETAIL=""
+	FETCH_TOOL=""
+	_FETCH_SEEN=""
+	_fetch_rc=127
+	_fetch_tried=0
+	mkdir -p "$TMPBASE" 2>/dev/null || true
+	FETCH_ERRFILE="$TMPBASE/.csqtt-fetch.$$"
+	_attempts=$(fetch_attempts)
+	# Общий бюджет времени: меню не должно «висеть» на трёх загрузчиках с
+	# повторами. 0 отключает ограничение (только для диагностики).
+	_budget=${CSQTT_FETCH_BUDGET:-60}
+	case "$_budget" in '' | *[!0-9]*) _budget=60 ;; esac
+	_FETCH_STOP=0
+	if [ "$_budget" -gt 0 ]; then
+		_start=$(date +%s 2>/dev/null) || _start=""
+		[ -n "$_start" ] && _FETCH_STOP=$((_start + _budget))
+	fi
+	# uclient-fetch: код 8 — подтверждённый HTTP-ответ, 4 — связь, 5 — TLS.
+	# Подавление вывода (-q) не используется: именно текст ошибки содержит
+	# подтверждённый код HTTP. Вывод инструмента уходит в отдельный файл и
+	# пользователю не показывается.
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		_fetch_tried=1
+		fetch_one uclient-fetch "$_attempts" "$2" uclient-fetch -T 15 -O "$2" "$1"
+		_fetch_rc=$?
+		[ "$_fetch_rc" -eq 0 ] && { rm -f "$FETCH_ERRFILE"; return 0; }
+	fi
+	# wget: BusyBox/GNU, без -t/--tries (на OpenWrt это uclient-fetch).
+	if command -v wget >/dev/null 2>&1; then
+		_fetch_tried=1
+		fetch_one wget "$_attempts" "$2" wget -T 30 -O "$2" "$1"
+		_fetch_rc=$?
+		[ "$_fetch_rc" -eq 0 ] && { rm -f "$FETCH_ERRFILE"; return 0; }
 	fi
 	if command -v curl >/dev/null 2>&1; then
-		if curl -fsSL --connect-timeout 15 --max-time 90 "$1" -o "$2"; then
-			return 0
-		else
-			_fetch_rc=$?
-		fi
+		_fetch_tried=1
+		fetch_one curl "$_attempts" "$2" curl -fsSL --connect-timeout 15 --max-time 90 "$1" -o "$2"
+		_fetch_rc=$?
+		[ "$_fetch_rc" -eq 0 ] && { rm -f "$FETCH_ERRFILE"; return 0; }
 	fi
-	rm -f "$2"
+	rm -f "$2" "$FETCH_ERRFILE"
+	if [ "$_fetch_tried" = 0 ]; then
+		FETCH_ERR=nodl
+		return 127
+	fi
 	return "$_fetch_rc"
+}
+
+# Человекочитаемая причина отказа загрузки по виду и подтверждённому коду.
+fetch_reason_text() { # KIND [DETAIL]
+	case "$1" in
+	http) printf 'сервер вернул ошибку HTTP%s' "${2:+ $2}" ;;
+	tls) printf 'не пройдена проверка TLS/сертификата' ;;
+	nodl) printf 'нет инструмента скачивания (uclient-fetch, wget или curl)' ;;
+	empty) printf 'сервер вернул пустой ответ (файл не записан)' ;;
+	*) printf 'нет соединения с сервером (сеть, DNS или тайм-аут)' ;;
+	esac
+}
+
+# Человекочитаемая причина отказа текущего fetch (для сообщений и маркеров).
+fetch_fail_hint() {
+	fetch_reason_text "$FETCH_ERR" "$FETCH_DETAIL"
 }
 
 asset_download_url() {
@@ -525,7 +736,7 @@ asset_download_url() {
 fetch_manifest() {
 	[ -d "$WORK" ] || mkdir -p "$WORK"
 	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
-		die "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть); изменения не вносились" "$EX_PREFLIGHT"
+		die "не удалось загрузить SHA256SUMS из $BASE_URL: $(fetch_fail_hint); изменения не вносились" "$EX_PREFLIGHT"
 	fi
 	[ -s "$WORK/SHA256SUMS" ] || die "SHA256SUMS пуст; выпуск неполный, изменения не вносились" "$EX_PREFLIGHT"
 }
@@ -595,11 +806,12 @@ download_asset() { # download_asset "hash name" component
 	*/* | "" | . | ..) die "недопустимое имя файла в SHA256SUMS: $_dl_name" "$EX_PREFLIGHT" ;;
 	esac
 	if ! fetch "$(asset_download_url "$_dl_name")" "$WORK/$_dl_name"; then
+		_dl_hint=$(fetch_fail_hint)
 		if [ -n "$PIN_NAME" ]; then
-			emit "ARTIFACT_CHANGED|reason:unavailable|component:$INSTALL_SET|name:$_dl_name"
-			die "проверенный файл $_dl_name недоступен (404 или сеть); повторите проверку обновлений" "$EX_PREFLIGHT"
+			emit "ARTIFACT_CHANGED|reason:unavailable|component:$INSTALL_SET|name:$_dl_name|fetch:${FETCH_ERR:-network}"
+			die "проверенный файл $_dl_name недоступен: $_dl_hint; повторите проверку обновлений" "$EX_PREFLIGHT"
 		fi
-		die "не удалось скачать $_dl_name (404 или сеть); изменения не вносились" "$EX_PREFLIGHT"
+		die "не удалось скачать $_dl_name: $_dl_hint; изменения не вносились" "$EX_PREFLIGHT"
 	fi
 	if [ ! -s "$WORK/$_dl_name" ]; then
 		if [ -n "$PIN_NAME" ]; then
@@ -759,6 +971,7 @@ ver_cmp() {
 check_download() { # "hash name" -> 0; CHECK_ERR/CHECK_ERR_NAME
 	CHECK_ERR=""
 	CHECK_ERR_NAME=""
+	CHECK_FETCH_ERR=""
 	_cd_hash=${1%% *}
 	_cd_name=${1#* }
 	case "$_cd_name" in
@@ -769,7 +982,13 @@ check_download() { # "hash name" -> 0; CHECK_ERR/CHECK_ERR_NAME
 		;;
 	esac
 	if ! fetch "$BASE_URL/$_cd_name" "$WORK/$_cd_name"; then
-		CHECK_ERR=download
+		# Пустое тело — отдельная причина: сеть могла быть доступна.
+		if [ "$FETCH_ERR" = empty ]; then
+			CHECK_ERR=empty
+		else
+			CHECK_ERR=download
+			CHECK_FETCH_ERR=${FETCH_ERR:-network}
+		fi
 		CHECK_ERR_NAME="$_cd_name"
 		return 1
 	fi
@@ -995,6 +1214,12 @@ restart_service() {
 		info "перезапуск службы пропущен (--no-restart)"
 		return 0
 	}
+	# [058/r34] --keep-stopped: удаление работающего/последнего ядра не должно
+	# поднимать службу ни здесь, ни в postrm.
+	[ "$KEEP_STOPPED" -eq 1 ] && {
+		info "служба оставлена остановленной (--keep-stopped)"
+		return 0
+	}
 	if [ -x "$INITD" ]; then
 		if "$INITD" restart >/dev/null 2>&1; then
 			ok "служба перезапущена"
@@ -1007,7 +1232,7 @@ restart_service() {
 }
 
 stop_service() {
-	[ "$NO_RESTART" -eq 1 ] && return 0
+	[ "$NO_RESTART" -eq 1 ] && [ "$KEEP_STOPPED" -eq 0 ] && return 0
 	[ -x "$INITD" ] || return 0
 	"$INITD" stop >/dev/null 2>&1 || true
 }
@@ -1022,10 +1247,35 @@ ensure_state() {
 take_lock() {
 	[ "$LOCKED" -eq 1 ] && return 0
 	mkdir -p "$TMPBASE"
-	if ! mkdir "$LOCK" 2>/dev/null; then
+	if mkdir "$LOCK" 2>/dev/null; then
+		LOCKED=1
+		printf '%s\n' "$$" >"$LOCK/pid" 2>/dev/null || true
+		return 0
+	fi
+	# [r38] timeout -k может завершить установщик сигналом KILL: trap не
+	# выполнится, каталог блокировки останется. Блокировка мёртвого
+	# процесса не должна запрещать повторную проверку. Живой pid — занято;
+	# запись без pid снимается только после 2 минут, чтобы не отобрать
+	# блокировку у параллельного живого запуска прежней версии.
+	_old_pid=""
+	[ -f "$LOCK/pid" ] && _old_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+	case "$_old_pid" in
+	'' | *[!0-9]*) _old_pid="" ;;
+	esac
+	if [ -n "$_old_pid" ] && [ -d "/proc/$_old_pid" ]; then
 		die "другой запуск установщика уже выполняется ($LOCK)" "$EX_BUSY"
 	fi
-	LOCKED=1
+	if [ -z "$_old_pid" ] &&
+		[ -z "$(find "$LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+		die "другой запуск установщика уже выполняется ($LOCK)" "$EX_BUSY"
+	fi
+	rm -rf "$LOCK" 2>/dev/null || true
+	if mkdir "$LOCK" 2>/dev/null; then
+		LOCKED=1
+		printf '%s\n' "$$" >"$LOCK/pid" 2>/dev/null || true
+		return 0
+	fi
+	die "другой запуск установщика уже выполняется ($LOCK)" "$EX_BUSY"
 }
 
 copy_pkg_files() { # copy_pkg_files PKG DIR
@@ -1306,30 +1556,88 @@ state_check() { # state_check SET
 
 # --- выбор состава ---------------------------------------------------------
 
-# [057] Наличие ядра 2.1.9 для точной линии OpenWrt, архитектуры и формата
+# [057/063] Наличие ядра 2.1.9 для точной линии OpenWrt, архитектуры и формата
 # пакетов. Меню показывает пункты 2.1.9 только после подтверждения по
 # SHA256SUMS выпуска: без сети, без выпуска или без подходящего файла пункты
 # скрыты, а установка 2.5.3/панели остаётся доступной.
+# CORE219_AVAILABLE: 1 — пакет подтверждён, 0 — подтверждённое отсутствие,
+# -1 — проверить не удалось (причина в CORE219_REASON). Сетевой отказ больше
+# не выдаётся за отсутствие пакета.
+CORE219_AVAILABLE=-1
+CORE219_REASON=""
+CORE219_FETCH_ERR=""
+CORE219_FETCH_DETAIL=""
+
+# Похож ли файл на SHA256SUMS: хотя бы одна строка «<64 hex> <имя>».
+manifest_has_digest() { # manifest_has_digest FILE
+	awk 'NF >= 2 {
+		h = $1
+		sub(/\*$/, "", h)
+		if (length(h) == 64 && h ~ /^[0-9a-fA-F]+$/) { ok = 1; exit }
+	} END { exit ok ? 0 : 1 }' "$1"
+}
+
+core219_reason_text() { # core219_reason_text REASON
+	case "$1" in
+	unconfigured) printf 'выпуск не настроен (owner/repo/tag или BASE_URL)' ;;
+	api_unreachable) printf 'GitHub API недоступен: сеть, DNS, прокси или тайм-аут' ;;
+	not_published) printf 'опубликованный выпуск не найден (404 или нет релиза)' ;;
+	no_pm) printf 'не найден opkg или apk: формат пакетов неизвестен' ;;
+	no_arch) printf 'не удалось определить архитектуру пакетов' ;;
+	no_tmpdir) printf 'нет доступа к временному каталогу %s' "${TMPBASE:-/tmp}" ;;
+	fetch) printf 'не удалось загрузить SHA256SUMS: %s' "$(fetch_reason_text "$CORE219_FETCH_ERR" "$CORE219_FETCH_DETAIL")" ;;
+	manifest_empty) printf 'SHA256SUMS пуст' ;;
+	manifest_invalid) printf 'ответ не похож на SHA256SUMS (возможно, отдан HTML/JSON)' ;;
+	ambiguous) printf 'в SHA256SUMS несколько пакетов 2.1.9 для этой архитектуры' ;;
+	absent) printf 'в выпуске нет пакета 2.1.9 для этой линии, архитектуры и формата' ;;
+	*) printf 'причина не определена' ;;
+	esac
+}
+
 probe_core219() {
 	CORE219_AVAILABLE=-1
+	CORE219_REASON=""
+	CORE219_FETCH_ERR=""
+	CORE219_FETCH_DETAIL=""
 	detect_pm_soft
 	detect_series
 	load_release >/dev/null 2>&1 || true
-	[ "$RELEASE_READY" -eq 1 ] || return 0
-	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) return 0 ;; esac
-	[ -n "$PKG_EXT" ] || return 0
-	mkdir -p "$WORK" 2>/dev/null || return 0
-	fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null 2>&1 || return 0
-	[ -s "$WORK/SHA256SUMS" ] || return 0
-	CORE219_AVAILABLE=0
+	if [ "$RELEASE_READY" -ne 1 ]; then
+		case "$RELEASE_STATE" in
+		api_unreachable) CORE219_REASON=api_unreachable ;;
+		not_published) CORE219_REASON=not_published ;;
+		*) CORE219_REASON=unconfigured ;;
+		esac
+		return 0
+	fi
+	[ -n "$PKG_EXT" ] || { CORE219_REASON=no_pm; return 0; }
+	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) CORE219_REASON=no_arch; return 0 ;; esac
+	mkdir -p "$WORK" 2>/dev/null || { CORE219_REASON=no_tmpdir; return 0; }
+	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null 2>&1; then
+		CORE219_FETCH_ERR=$FETCH_ERR
+		CORE219_FETCH_DETAIL=$FETCH_DETAIL
+		CORE219_REASON=fetch
+		return 0
+	fi
+	[ -s "$WORK/SHA256SUMS" ] || { CORE219_REASON=manifest_empty; return 0; }
+	manifest_has_digest "$WORK/SHA256SUMS" || { CORE219_REASON=manifest_invalid; return 0; }
+	# Манифест подтверждён. «0» (пакета точно нет) ставится только после того,
+	# как поиск действительно не нашёл файла: неоднозначность — это -1, а не
+	# отсутствие, иначе меню сообщало бы «нет пакета» при двух кандидатах.
 	ARCH_RE=$(printf '%s' "$ARCH" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
 	escape_re csqtt-core-2.1.9
 	_c219=$(pick_asset "^${RE_ESC}[_-]${ARCH_RE}[.]${PKG_EXT}\$")
 	[ -n "$_c219" ] || _c219=$(pick_asset "^${RE_ESC}[_-].*[_-]${ARCH_RE}[.]${PKG_EXT}\$")
 	case "$_c219" in
-	'' | AMBIGUOUS) return 0 ;;
+	AMBIGUOUS) CORE219_REASON=ambiguous; return 0 ;;
+	'')
+		CORE219_AVAILABLE=0
+		CORE219_REASON=absent
+		return 0
+		;;
 	esac
 	CORE219_AVAILABLE=1
+	CORE219_REASON=found
 	# Найденный тег запоминается, чтобы require_release не спрашивал API снова.
 	[ -n "$TAG" ] && CSQTT_RELEASE_TAG=$TAG
 	return 0
@@ -1373,81 +1681,111 @@ menu_select() {
 		_menu_color=$(printf '\033[1;36m')
 		_menu_reset=$(printf '\033[0m')
 	fi
-	printf '\n%sCSQTT для OpenWrt%s\n' "$_menu_color" "$_menu_reset" >&2
-	printf 'Проверка доступных компонентов…\n' >&2
-	probe_core219
-	printf '%s · %s · %s\n\n' "${SERIES:-OpenWrt}" "${ARCH:-архитектура не определена}" "${PKG_EXT:-пакеты}" >&2
-	printf 'На устройстве:\n' >&2
-	for _mi_pkg in csqtt-core-2.5.3 csqtt-core-2.1.9 "$PANEL_PACKAGE"; do
-		_mi_ver=$(installed_version_of "$_mi_pkg")
-		case "$_mi_pkg" in
-		csqtt-core-*) _mi_label="Ядро ${_mi_pkg#csqtt-core-}" ;;
-		*) _mi_label="Панель CSQTT" ;;
-		esac
-		if [ -n "$_mi_ver" ]; then
-			printf '  %s: уже установлено (%s)\n' "$_mi_label" "${_mi_ver%-r*}" >&2
+	# Ручной повтор проверки 2.1.9: только по явному вводу, не более двух раз,
+	# без автоматического опроса сети.
+	_menu_retries=0
+	while :; do
+		printf '\n%sCSQTT для OpenWrt%s\n' "$_menu_color" "$_menu_reset" >&2
+		printf 'Проверка доступных компонентов…\n' >&2
+		probe_core219
+		printf '%s · %s · %s\n\n' "${SERIES:-OpenWrt}" "${ARCH:-архитектура не определена}" "${PKG_EXT:-пакеты}" >&2
+		printf 'На устройстве:\n' >&2
+		for _mi_pkg in csqtt-core-2.5.3 csqtt-core-2.1.9 "$PANEL_PACKAGE"; do
+			_mi_ver=$(installed_version_of "$_mi_pkg")
+			case "$_mi_pkg" in
+			csqtt-core-*) _mi_label="Ядро ${_mi_pkg#csqtt-core-}" ;;
+			*) _mi_label="Панель CSQTT" ;;
+			esac
+			if [ -n "$_mi_ver" ]; then
+				printf '  %s: уже установлено (%s)\n' "$_mi_label" "${_mi_ver%-r*}" >&2
+			else
+				printf '  %s: не установлено\n' "$_mi_label" >&2
+			fi
+		done
+		printf 'Установленные компоненты будут проверены на обновление.\n\n' >&2
+		printf '%sВыберите состав:%s\n' "$_menu_color" "$_menu_reset" >&2
+		printf '  1) ядро 2.5.3 и панель\n' >&2
+		printf '  2) только ядро 2.5.3\n' >&2
+		printf '  3) только панель\n' >&2
+		_menu_del=0
+		_menu_can_retry=0
+		if [ "$CORE219_AVAILABLE" -eq 1 ]; then
+			printf '  4) ядро 2.1.9 и панель\n' >&2
+			printf '  5) только ядро 2.1.9\n' >&2
+			_menu_del=6
+		elif [ "$CORE219_AVAILABLE" -eq 0 ]; then
+			info "пункты ядра 2.1.9 скрыты: для ${SERIES:-этой линии}/${ARCH:-этой архитектуры} (${PKG_EXT:-формат}) в выпуске нет пакета"
+			_menu_del=4
 		else
-			printf '  %s: не установлено\n' "$_mi_label" >&2
+			# Причина называется точно: сеть, отсутствие выпуска, нечитаемый
+			# манифест и подтверждённое отсутствие пакета — разные состояния.
+			warn "доступность ядра 2.1.9 не проверена: $(core219_reason_text "$CORE219_REASON")"
+			_menu_del=4
+			# Повтор помогает только при временной причине. Неоднозначность
+			# манифеста, отсутствие менеджера пакетов или архитектуры от
+			# повтора не изменятся — не предлагаем заведомо бесполезное.
+			case "$CORE219_REASON" in
+			fetch | manifest_empty | manifest_invalid | api_unreachable)
+				if [ "$_menu_retries" -lt 2 ]; then
+					_menu_can_retry=1
+					printf '  r) повторить проверку доступности 2.1.9 (осталось попыток: %s)\n' "$((2 - _menu_retries))" >&2
+				else
+					printf '  Лимит повторов проверки исчерпан: повторите запуск позже.\n' >&2
+				fi
+				;;
+			*)
+				printf '  Повтор не поможет: причина не сетевая — устраните её и запустите установщик снова.\n' >&2
+				;;
+			esac
 		fi
-	done
-	printf 'Установленные компоненты будут проверены на обновление.\n\n' >&2
-	printf '%sВыберите состав:%s\n' "$_menu_color" "$_menu_reset" >&2
-	printf '  1) ядро 2.5.3 и панель\n' >&2
-	printf '  2) только ядро 2.5.3\n' >&2
-	printf '  3) только панель\n' >&2
-	_menu_del=0
-	if [ "$CORE219_AVAILABLE" -eq 1 ]; then
-		printf '  4) ядро 2.1.9 и панель\n' >&2
-		printf '  5) только ядро 2.1.9\n' >&2
-		_menu_del=6
-	elif [ "$CORE219_AVAILABLE" -eq 0 ]; then
-		info "пункты ядра 2.1.9 скрыты: для ${SERIES:-этой линии}/${ARCH:-этой архитектуры} (${PKG_EXT:-формат}) в выпуске нет пакета"
-		_menu_del=4
-	else
-		warn "доступность ядра 2.1.9 не проверена: не удалось загрузить сведения выпуска. Проверьте доступ к GitHub и повторите запуск"
-		_menu_del=4
-	fi
-	case "$ACTION" in
-	install | update) printf '  %s) удалить компоненты…\n' "$_menu_del" >&2 ;;
-	esac
-	printf '\n  0) отмена\n\n' >&2
-	printf 'Ваш выбор > ' >&2
-	read -r _menu_ans || _menu_ans=""
-	case "$_menu_ans" in
-	0) exit 0 ;;
-	1)
-		INSTALL_SET="both"
-		CORE_BRANCH=2.5.3
-		CORE_VERSION=2.5.3
-		CORE_PACKAGE=csqtt-core-2.5.3
-		;;
-	2)
-		INSTALL_SET="core"
-		CORE_BRANCH=2.5.3
-		CORE_VERSION=2.5.3
-		CORE_PACKAGE=csqtt-core-2.5.3
-		;;
-	3) INSTALL_SET="panel"; CORE_BRANCH="" ;;
-	"$_menu_del")
 		case "$ACTION" in
-		install | update)
-			menu_remove_select
-			;;
-		*) die "для удаления запустите uninstall --set both" "$EX_USAGE" ;;
+		install | update) printf '  %s) удалить компоненты…\n' "$_menu_del" >&2 ;;
 		esac
-		;;
-	4)
-		[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
-		INSTALL_SET="both"
-		CORE_BRANCH=2.1.9
-		;;
-	5)
-		[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
-		INSTALL_SET="core"
-		CORE_BRANCH=2.1.9
-		;;
-	*) die "неизвестный выбор: $_menu_ans" "$EX_USAGE" ;;
-	esac
+		printf '\n  0) отмена\n\n' >&2
+		printf 'Ваш выбор > ' >&2
+		read -r _menu_ans || _menu_ans=""
+		case "$_menu_ans" in
+		0) exit 0 ;;
+		r | R | retry | п)
+			[ "$_menu_can_retry" -eq 1 ] || die "повтор проверки доступности 2.1.9 сейчас недоступен (лимит или уже подтверждённый результат)" "$EX_USAGE"
+			_menu_retries=$((_menu_retries + 1))
+			continue
+			;;
+		1)
+			INSTALL_SET="both"
+			CORE_BRANCH=2.5.3
+			CORE_VERSION=2.5.3
+			CORE_PACKAGE=csqtt-core-2.5.3
+			;;
+		2)
+			INSTALL_SET="core"
+			CORE_BRANCH=2.5.3
+			CORE_VERSION=2.5.3
+			CORE_PACKAGE=csqtt-core-2.5.3
+			;;
+		3) INSTALL_SET="panel"; CORE_BRANCH="" ;;
+		"$_menu_del")
+			case "$ACTION" in
+			install | update)
+				menu_remove_select
+				;;
+			*) die "для удаления запустите uninstall --set both" "$EX_USAGE" ;;
+			esac
+			;;
+		4)
+			[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
+			INSTALL_SET="both"
+			CORE_BRANCH=2.1.9
+			;;
+		5)
+			[ "$CORE219_AVAILABLE" -eq 1 ] || die "ядро 2.1.9 недоступно для этой платформы (нет пакета в выпуске)" "$EX_USAGE"
+			INSTALL_SET="core"
+			CORE_BRANCH=2.1.9
+			;;
+		*) die "неизвестный выбор: $_menu_ans" "$EX_USAGE" ;;
+		esac
+		break
+	done
 }
 
 resolve_set() {
@@ -1541,8 +1879,8 @@ cmd_check() {
 
 	mkdir -p "$WORK"
 	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
-		err "не удалось загрузить SHA256SUMS из $BASE_URL (404 или сеть)"
-		emit "CHECK_FAILED|stage:manifest|reason:network_or_404"
+		err "не удалось загрузить SHA256SUMS из $BASE_URL: $(fetch_fail_hint)"
+		emit "CHECK_FAILED|stage:manifest|reason:${FETCH_ERR:-network}"
 		exit "$EX_PREFLIGHT"
 	fi
 	if [ ! -s "$WORK/SHA256SUMS" ]; then
@@ -1584,8 +1922,10 @@ cmd_check() {
 			continue
 		fi
 		if ! check_download "$_cc_sel"; then
-			err "не удалось получить $CHECK_ERR_NAME ($CHECK_ERR)"
-			emit "CHECK_FAILED|stage:download|reason:$CHECK_ERR|name:$CHECK_ERR_NAME"
+			_if_hint=""
+			[ "$CHECK_ERR" = download ] && _if_hint=": $(fetch_fail_hint)"
+			err "не удалось получить $CHECK_ERR_NAME ($CHECK_ERR)$_if_hint"
+			emit "CHECK_FAILED|stage:download|reason:$CHECK_ERR|name:$CHECK_ERR_NAME${CHECK_FETCH_ERR:+|fetch:$CHECK_FETCH_ERR}"
 			_check_bad=1
 			_check_summary="$_check_summary $_cc:download_$CHECK_ERR"
 			continue
@@ -1999,6 +2339,9 @@ cmd_uninstall() {
 
 main() {
 	parse_args "$@"
+	if [ "$KEEP_STOPPED" -eq 1 ] && [ "$ACTION" != uninstall ]; then
+		die "--keep-stopped поддерживается только для uninstall" "$EX_USAGE"
+	fi
 	case "$ACTION:$MENU" in
 		install:1|update:1|check:1|uninstall:1) menu_select ;;
 	esac
