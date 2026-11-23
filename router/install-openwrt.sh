@@ -1,109 +1,68 @@
 #!/bin/sh
-case "${1:---menu}" in
-2.0) ;;
-*)
-    choice=${1:---menu}
-    [ "$#" -eq 0 ] || shift
-    case "$choice" in
-      --menu) set -- install --menu "$@" ;;
-      2.5) set -- install --set panel "$@" ;;
-      *) echo "Использование: install-openwrt.sh [--menu|2.0|2.5]" >&2; exit 2 ;;
-    esac
-    f=$(mktemp) || exit 1
-    trap 'rm -f "$f"' EXIT
-    wget -T 30 -qO "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh || exit 1
-    printf '%s  %s
-' 'daa733319918c442de96679e3ea7f536e0c6beeff06e10feb1775b1338916de5' "$f" | sha256sum -c - || exit 1
-    sh "$f" "$@"
-    exit $?
-    ;;
-esac
-#!/bin/sh
 # SPDX-FileCopyrightText: 2026 amurcanov
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+#
+# Совместимый алиас: скачивает закреплённый main/install.sh, проверяет его
+# SHA-256 и передаёт управление ему. Ядро 2.5.3 и панель ставит сам install.sh;
+# здесь только разбор аргументов и транспорт.
 set -eu
 umask 077
 
+url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh
+sha=cacee69d37adcfe450449a5b59a97209da1e87e34535bb0193f8e74017effb25
+
+usage() {
+    cat <<'EOF'
+Использование: sh install-openwrt.sh [ОПЦИЯ] [--yes|-y] [--dry-run]
+  (без опции), --menu   меню ядра 2.5.3 / панели CSQTT 2.5
+  2.5                   установка только панели CSQTT 2.5 (ядро — через --menu)
+  2.0                   установка панели CSQTT 2.0
+  -h, --help            эта справка
+Остальные параметры передаются install.sh без изменений.
+EOF
+}
+
 choice=${1:---menu}
+[ "$#" -eq 0 ] || shift
 case "$choice" in
-    2.0)
-        tag=v2.0
-        installer=install-csqtt.sh
-        sha=94dc5af61df134841c7b148af4876ca7d0ee80ff19b520e773bd5ca2bc4e8a7d
-        ;;
-    2.5|--menu)
-        tag=v2.5.3
-        installer=install-router.sh
-        sha=f8a69518e2df17b369ff373215fa8ead81c41286c841ab55b7746f924940c337
-        ;;
+    -h|--help) usage; exit 0 ;;
+    --menu|2.5|2.0) ;;
     *)
-        printf 'Использование: sh install-openwrt.sh [--menu | 2.0 | 2.5] [--yes] [--dry-run]\n' >&2
+        printf 'Неизвестный параметр: %s\n' "$choice" >&2
+        usage >&2
         exit 2
         ;;
 esac
-[ "$#" -eq 0 ] || shift
-for option do
-    case "$option" in
-        --yes|--dry-run) ;;
-        *) printf 'Неизвестный параметр: %s\n' "$option" >&2; exit 2 ;;
-    esac
-done
+case "$choice" in
+    --menu) set -- install --menu "$@" ;;
+    2.5) set -- install --set panel "$@" ;;
+    2.0) set -- 2.0 "$@" ;;
+esac
 
-component=panel
-if [ "$choice" = --menu ]; then
-    [ -t 0 ] || { printf 'Меню нужно запускать в интерактивном SSH-терминале.\n' >&2; exit 2; }
-    while :; do
-        printf '\nCSQTT для OpenWrt\n  1. Ядро 2.5.3 и панель CSQTT 2.5\n  2. Только ядро 2.5.3\n  3. Только панель CSQTT 2.5\n  0. Отмена\nВыберите [0–3] ' >&2
-        read -r selected || exit 1
-        case "$selected" in
-            1) component=both; break ;;
-            2) component=core; break ;;
-            3) component=panel; break ;;
-            0) exit 0 ;;
-        esac
-    done
-fi
-
-work=$(mktemp -d)
-trap 'rm -f -- "$work/$installer" "$work/uclient-fetch"; rmdir -- "$work"' EXIT
+work=$(mktemp -d) || exit 1
+installer=$work/install.sh
+trap 'rm -f "$installer"; rmdir "$work" 2>/dev/null || :' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-CSQTT_ORIGINAL_UCLIENT=$(command -v uclient-fetch || :)
-export CSQTT_ORIGINAL_UCLIENT
 
-# The pinned installers prefer uclient-fetch. Keep the fallback local to
-# these child processes and use the same transport for their release assets.
-cat >"$work/uclient-fetch" <<'SH'
-#!/bin/sh
-[ "$#" -eq 4 ] && [ "$1" = -q ] && [ "$2" = -O ] || exit 2
-out=$3
-url=$4
-if command -v wget >/dev/null 2>&1 && wget -T 30 -qO "$out" "$url" && [ -s "$out" ]; then
-    exit 0
+printf 'CSQTT — загрузка install.sh…\n' >&2
+if command -v wget >/dev/null 2>&1 && wget -T 30 -qO "$installer" "$url"; then
+    :
+elif command -v curl >/dev/null 2>&1 &&
+     curl -fLsS --connect-timeout 15 --max-time 60 -o "$installer" "$url"; then
+    :
+elif command -v uclient-fetch >/dev/null 2>&1 &&
+     uclient-fetch -q -O "$installer" "$url"; then
+    :
+else
+    rm -f "$installer"
+    printf 'Не удалось скачать %s\n' "$url" >&2
+    exit 1
 fi
-if command -v curl >/dev/null 2>&1 && curl -fLsS --connect-timeout 15 --max-time 60 "$url" -o "$out" && [ -s "$out" ]; then
-    exit 0
-fi
-if [ -n "$CSQTT_ORIGINAL_UCLIENT" ] && command -v timeout >/dev/null 2>&1 &&
-    timeout 20 "$CSQTT_ORIGINAL_UCLIENT" -q -O "$out" "$url" && [ -s "$out" ]; then
-    exit 0
-fi
-rm -f -- "$out"
-printf 'Не удалось скачать %s\n' "$url" >&2
-exit 1
-SH
-chmod 700 "$work/uclient-fetch"
+[ -s "$installer" ] || { printf 'Пустой ответ: %s\n' "$url" >&2; exit 1; }
 
-base=https://github.com/starkugz/csqtt-openwrt/releases/download/$tag
-"$work/uclient-fetch" -q -O "$work/$installer" "$base/$installer"
-printf '%s  %s\n' "$sha" "$work/$installer" | sha256sum -c -
+printf '%s  %s\n' "$sha" "$installer" | sha256sum -c - >/dev/null ||
+    { printf 'Не совпал SHA-256 %s\n' "$url" >&2; exit 1; }
 
-PATH="$work:$PATH"
-export PATH
-case "$choice" in
-    2.0|2.5) printf 'Выбрана установка только панели CSQTT %s из %s.\n' "$choice" "$tag" ;;
-esac
-case "$choice" in
-    2.0) CSQTT_VERSION="$tag" sh "$work/$installer" --set panel "$@" ;;
-    2.5|--menu) CSQTT_RELEASE_BASE_URL="$base" sh "$work/$installer" install --set "$component" "$@" ;;
-esac
+sh "$installer" "$@"
+exit $?
