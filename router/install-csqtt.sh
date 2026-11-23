@@ -41,6 +41,7 @@
 #   20 ошибка до изменений (манифест, SHA, ABI, зависимости, место, выпуск)
 #   30 проверка после установки не прошла, прежнее состояние восстановлено
 #   31 восстановить/удалить не удалось — нужна ручная команда
+#   32 пакеты установлены, но служба/интерфейс не поднялись (не OK и не откат)
 #   40 занято другим запуском
 #   60 выпуск BLOCKED: не заданы owner/repo/tag
 #
@@ -57,6 +58,10 @@ EX_USAGE=2
 EX_PREFLIGHT=20
 EX_RECOVERED=30
 EX_FAILED=31
+# [AUDIT BUG-02] Пакеты установлены, но служба не поднялась. Это не откат
+# (файлы и конфигурация на месте) и не успех: вызывающий обязан показать
+# отдельное состояние и не считать установку рабочей.
+EX_SERVICE=32
 EX_BUSY=40
 EX_BLOCKED=60
 
@@ -296,8 +301,15 @@ probe_pm() {
 }
 
 opkg_arch() {
+	# [AUDIT BUG-08] Выбирается архитектура с максимальным числовым
+	# приоритетом, а не первая строка вывода: на MIPS `print-architecture`
+	# может начинаться с `mipsel_24kc_24kf 5`, тогда как пакет выпуска
+	# собран для `mipsel_24kc 10`. При равном приоритете остаётся первая.
 	opkg print-architecture 2>/dev/null |
-		awk '$1=="arch" && $2!="all" && $2!="noarch" {print $2; exit}'
+		awk '$1=="arch" && $2!="all" && $2!="noarch" {
+			p = $3 + 0
+			if (name == "" || p > best) { best = p; name = $2 }
+		} END { if (name != "") print name }'
 }
 
 apk_arch() {
@@ -526,7 +538,6 @@ require_release() {
 # Пустой FETCH_ERR при успехе. Ни одна неудача не выдаётся за HTTP 404.
 FETCH_ERR=""
 FETCH_DETAIL=""
-FETCH_TOOL=""
 
 # Подтверждённый код HTTP из текста ошибки (BusyBox/GNU wget, uclient-fetch).
 fetch_http_code() { # MSG -> 404|403|5xx|пусто
@@ -577,7 +588,6 @@ fetch_try() { # fetch_try TOOL ARGS...
 	[ "$_fetch_rc" -eq 0 ] && return 0
 	_fetch_msg=""
 	[ -s "$FETCH_ERRFILE" ] && _fetch_msg=$(tr '\n' ' ' <"$FETCH_ERRFILE" 2>/dev/null || true)
-	FETCH_TOOL=$_fetch_tool
 	fetch_classify "$_fetch_tool" "$_fetch_rc" "$_fetch_msg"
 	return "$_fetch_rc"
 }
@@ -631,7 +641,7 @@ fetch_one() { # fetch_one TOOL ATTEMPTS OUT CMD...
 	_fo_id=$(fetch_tool_id "$_fo_tool" 2>/dev/null) || _fo_id=""
 	if [ -n "$_fo_id" ]; then
 		case " $_FETCH_SEEN " in
-		*" $_fo_id "*) FETCH_TOOL=$_fo_tool; return 1 ;;
+		*" $_fo_id "*) return 1 ;;
 		esac
 		_FETCH_SEEN="$_FETCH_SEEN $_fo_id"
 	fi
@@ -647,7 +657,6 @@ fetch_one() { # fetch_one TOOL ATTEMPTS OUT CMD...
 		if [ "$_fo_rc" -eq 0 ]; then
 			[ -s "$_fo_out" ] && return 0
 			[ -n "$FETCH_ERR" ] || FETCH_ERR=empty
-			FETCH_TOOL=$_fo_tool
 			_fo_rc=1
 		fi
 		case "$FETCH_ERR" in
@@ -663,7 +672,6 @@ fetch_one() { # fetch_one TOOL ATTEMPTS OUT CMD...
 fetch() { # fetch URL OUT
 	FETCH_ERR=""
 	FETCH_DETAIL=""
-	FETCH_TOOL=""
 	_FETCH_SEEN=""
 	_fetch_rc=127
 	_fetch_tried=0
@@ -1046,6 +1054,76 @@ installed_version_of() {
 	fi
 }
 
+# [AUDIT BUG-03] Путь к базе пакетного менеджера. Откат одних файлов оставлял
+# в базе новую версию: следующий `opkg install`/`apk add` считал бы пакет
+# актуальным, хотя на диске лежат файлы прежней версии.
+pm_db_path() {
+	if [ -n "${CSQTT_PM_DB:-}" ]; then
+		printf '%s' "$CSQTT_PM_DB"
+	elif [ "$PM" = "apk" ]; then
+		printf '%s' "${ROOT%/}/lib/apk/db/installed"
+	else
+		printf '%s' "${ROOT%/}/usr/lib/opkg/status"
+	fi
+}
+
+# Переписать версию установленного пакета в базе PM. Форматы различаются:
+# opkg status — абзацы «Package:/Version:», apk installed — «P:/V:».
+# Отсутствие записи — ошибка: иначе откат молча оставил бы чужую версию.
+pm_db_set_version() { # pm_db_set_version PKG VERSION
+	_pv_pkg=$1
+	_pv_ver=$2
+	_pv_db=$(pm_db_path)
+	[ -f "$_pv_db" ] || return 1
+	_pv_tmp="$_pv_db.csqtt.$$"
+	if [ "$PM" = "apk" ]; then
+		awk -v pkg="$_pv_pkg" -v ver="$_pv_ver" '
+			BEGIN { RS = ""; FS = "\n"; OFS = "\n"; ORS = "\n\n" }
+			{
+				hit = 0
+				for (i = 1; i <= NF; i++)
+					if ($i == "P:" pkg) hit = 1
+				if (hit) {
+					for (i = 1; i <= NF; i++)
+						if ($i ~ /^V:/) $i = "V:" ver
+					done++
+				}
+				print
+			}
+			END { exit done ? 0 : 1 }
+		' "$_pv_db" >"$_pv_tmp" || {
+			rm -f "$_pv_tmp" 2>/dev/null || true
+			return 1
+		}
+	else
+		awk -v pkg="$_pv_pkg" -v ver="$_pv_ver" '
+			BEGIN { RS = ""; FS = "\n"; OFS = "\n"; ORS = "\n\n" }
+			{
+				hit = 0
+				for (i = 1; i <= NF; i++)
+					if ($i == "Package: " pkg) hit = 1
+				if (hit) {
+					for (i = 1; i <= NF; i++)
+						if ($i ~ /^Version:/) $i = "Version: " ver
+					done++
+				}
+				print
+			}
+			END { exit done ? 0 : 1 }
+		' "$_pv_db" >"$_pv_tmp" || {
+			rm -f "$_pv_tmp" 2>/dev/null || true
+			return 1
+		}
+	fi
+	# Копия базы до правки — для ручного разбора, если откат прервётся.
+	cp -p "$_pv_db" "$_pv_db.csqtt-rollback" 2>/dev/null || true
+	mv -f "$_pv_tmp" "$_pv_db" || {
+		rm -f "$_pv_tmp" 2>/dev/null || true
+		return 1
+	}
+	return 0
+}
+
 dep_ok() {
 	if [ "$PM" = "apk" ]; then
 		apk info -e "$1" >/dev/null 2>&1
@@ -1199,12 +1277,24 @@ service_enabled() {
 	return 1
 }
 
+# Работаем на реальном корне (не офлайн CSQTT_ROOT). Проверки службы,
+# ubus и интерфейса имеют смысл только там. CSQTT_INSTALLER_LIVE_RUNTIME=1 —
+# только для тестов: позволяет изолированно проверить саму логику.
+live_runtime() {
+	[ -z "$ROOT" ] || [ "${CSQTT_INSTALLER_LIVE_RUNTIME:-0}" = "1" ]
+}
+
+# Каталог сетевых интерфейсов (переопределяется тестом).
+net_sys_dir() {
+	printf '%s' "${CSQTT_INSTALLER_NET_DIR:-/sys/class/net}"
+}
+
 # Запущена ли служба сейчас. Нужно снимку: откат обязан вернуть не только файлы,
 # но и работающий движок (иначе после неудачной установки служба остаётся
 # остановленной, как её остановил postinst нового ядра). В офлайн-корне и там,
 # где ubus недоступен, ответ — «нет»: перезапускать нечего.
 service_running() {
-	[ -n "$ROOT" ] && return 1
+	live_runtime || return 1
 	command -v ubus >/dev/null 2>&1 || return 1
 	ubus -t 2 call service list '{"name":"csqtt"}' 2>/dev/null | grep -q '"running": true'
 }
@@ -1223,11 +1313,15 @@ restart_service() {
 	if [ -x "$INITD" ]; then
 		if "$INITD" restart >/dev/null 2>&1; then
 			ok "служба перезапущена"
-		else
-			warn "служба не перезапустилась; проверьте вручную: $INITD restart"
+			return 0
 		fi
+		# [AUDIT BUG-02] Сбой перезапуска — не «предупреждение с кодом 0»:
+		# вызывающий обязан увидеть неуспех и не выдавать установку за рабочую.
+		warn "служба не перезапустилась; проверьте вручную: $INITD restart"
+		return 1
 	else
 		info "init-скрипт отсутствует: перезапуск не требуется"
+		return 0
 	fi
 }
 
@@ -1301,37 +1395,40 @@ copy_pkg_files() { # copy_pkg_files PKG DIR
 
 make_backup() { # make_backup ACTION -> dir
 	_mb_action=$1
-	_mb_ts=$(date '+%Y%m%d-%H%M%S')
+	_mb_ts=$(date '+%Y%m%d-%H%M%S') || return 1
 	_mb_dir="$STATE_DIR/backups/${_mb_ts}-${_mb_action}-$$"
-	mkdir -p "$_mb_dir/files"
+	# [AUDIT BUG-06] Снимок — обязательный шаг: любая ошибка записи должна
+	# вернуть неуспех, иначе вызывающий продолжит без возможности отката.
+	mkdir -p "$_mb_dir/files" || return 1
 	chmod 0700 "$_mb_dir" 2>/dev/null || true
-	printf '%s\n' "$_mb_ts" >"$_mb_dir/timestamp"
-	printf '%s\n' "$_mb_action" >"$_mb_dir/action"
-	printf '%s\n' "$PM" >"$_mb_dir/pm"
-	printf '%s\n' "$PKG_EXT" >"$_mb_dir/pkg_ext"
-	printf '%s\n' "$ARCH" >"$_mb_dir/arch"
-	printf '%s\n' "$CORE_PACKAGE" >"$_mb_dir/core_package"
-	installed_version_of "$CORE_PACKAGE" >"$_mb_dir/core_version"
-	installed_version_of "$PANEL_PACKAGE" >"$_mb_dir/panel_version"
+	printf '%s\n' "$_mb_ts" >"$_mb_dir/timestamp" || return 1
+	printf '%s\n' "$_mb_action" >"$_mb_dir/action" || return 1
+	printf '%s\n' "$PM" >"$_mb_dir/pm" || return 1
+	printf '%s\n' "$PKG_EXT" >"$_mb_dir/pkg_ext" || return 1
+	printf '%s\n' "$ARCH" >"$_mb_dir/arch" || return 1
+	printf '%s\n' "$CORE_PACKAGE" >"$_mb_dir/core_package" || return 1
+	printf '%s\n' "$PANEL_PACKAGE" >"$_mb_dir/panel_package" || return 1
+	installed_version_of "$CORE_PACKAGE" >"$_mb_dir/core_version" || return 1
+	installed_version_of "$PANEL_PACKAGE" >"$_mb_dir/panel_version" || return 1
 	[ -n "$(cat "$_mb_dir/core_version")" ] && echo yes >"$_mb_dir/core_present" || echo no >"$_mb_dir/core_present"
 	[ -n "$(cat "$_mb_dir/panel_version")" ] && echo yes >"$_mb_dir/panel_present" || echo no >"$_mb_dir/panel_present"
 	if [ -f "$CONFIG" ]; then
-		echo yes >"$_mb_dir/config_present"
-		cp -p "$CONFIG" "$_mb_dir/config.csqtt"
+		echo yes >"$_mb_dir/config_present" || return 1
+		cp -p "$CONFIG" "$_mb_dir/config.csqtt" || return 1
 		chmod 0600 "$_mb_dir/config.csqtt" 2>/dev/null || true
-		config_sha >"$_mb_dir/config.sha256"
+		config_sha >"$_mb_dir/config.sha256" || return 1
 		_mb_mode=$(stat -c '%a' "$CONFIG" 2>/dev/null || true)
-		printf '%s\n' "${_mb_mode:-600}" >"$_mb_dir/config_mode"
+		printf '%s\n' "${_mb_mode:-600}" >"$_mb_dir/config_mode" || return 1
 	else
-		echo no >"$_mb_dir/config_present"
+		echo no >"$_mb_dir/config_present" || return 1
 	fi
-	if service_enabled; then echo yes >"$_mb_dir/service_enabled"; else echo no >"$_mb_dir/service_enabled"; fi
-	if service_running; then echo yes >"$_mb_dir/service_running"; else echo no >"$_mb_dir/service_running"; fi
+	if service_enabled; then echo yes >"$_mb_dir/service_enabled" || return 1; else echo no >"$_mb_dir/service_enabled" || return 1; fi
+	if service_running; then echo yes >"$_mb_dir/service_running" || return 1; else echo no >"$_mb_dir/service_running" || return 1; fi
 	# Активное ядро до операции: откат возвращает общие точки входа именно к
 	# нему, а не к «лучшему установленному» (после неудачной установки набор
 	# мог измениться). Пусто — точек входа ещё нет.
 	_mb_active=$(cat "$ROOT/usr/lib/csqtt/active" 2>/dev/null || true)
-	printf '%s\n' "$_mb_active" >"$_mb_dir/active_core"
+	printf '%s\n' "$_mb_active" >"$_mb_dir/active_core" || return 1
 	if [ -s "$_mb_dir/core_version" ] && [ -n "$(cat "$_mb_dir/core_version")" ]; then
 		copy_pkg_files "$CORE_PACKAGE" "$_mb_dir/core" || return 1
 	fi
@@ -1381,6 +1478,29 @@ restore_files() { # restore_files BACKUP_PKG_DIR [LABEL]
 			return 1
 		}
 	done <"$_rs_dir/files.list"
+}
+
+# [AUDIT BUG-03] Вернуть версии компонентов в базе PM. Вызывается после
+# восстановления файлов; для компонентов, которых до операции не было,
+# restore_snapshot уже удалил запись через pm_remove.
+restore_pm_versions() { # restore_pm_versions BACKUP_DIR
+	_rpm_b=$1
+	_rpm_fail=0
+	for _rpm_name in core panel; do
+		_rpm_present=$(cat "$_rpm_b/${_rpm_name}_present" 2>/dev/null || echo no)
+		_rpm_ver=$(cat "$_rpm_b/${_rpm_name}_version" 2>/dev/null || true)
+		case "$_rpm_name" in
+		core) _rpm_pkg=$CORE_PACKAGE ;;
+		panel) _rpm_pkg=$PANEL_PACKAGE ;;
+		esac
+		[ "$_rpm_present" = "yes" ] || continue
+		[ -n "$_rpm_ver" ] || continue
+		if ! pm_db_set_version "$_rpm_pkg" "$_rpm_ver"; then
+			err "откат: не удалось вернуть версию $_rpm_pkg ($_rpm_ver) в базе $PM"
+			_rpm_fail=1
+		fi
+	done
+	return "$_rpm_fail"
 }
 
 restore_snapshot() { # restore_snapshot BACKUP_DIR
@@ -1433,6 +1553,9 @@ restore_snapshot() { # restore_snapshot BACKUP_DIR
 			return 1
 		}
 	fi
+	# [AUDIT BUG-03] База PM возвращается вместе с файлами. Иначе версия в
+	# opkg/apk остаётся новой и следующий install считает пакет актуальным.
+	restore_pm_versions "$_rss_b" || return 1
 	# Возврат общих точек входа к ядру, активному до операции. Файлы ядра уже
 	# восстановлены; без активации /usr/bin/csqtt и /etc/init.d/csqtt могли бы
 	# указывать на неудачно установленное ядро, а служба — остаться
@@ -1475,6 +1598,13 @@ verify_restored() { # verify_restored BACKUP_DIR
 		}
 	fi
 	if [ "$(cat "$_vr_b/core_present" 2>/dev/null || echo no)" = "yes" ]; then
+		# [AUDIT BUG-03] Проверяется не только файл, но и версия в базе PM:
+		# иначе «откат выполнен» при новой версии в opkg/apk — ложный успех.
+		_vr_ver=$(cat "$_vr_b/core_version" 2>/dev/null || true)
+		[ "$(installed_version_of "$CORE_PACKAGE")" = "$_vr_ver" ] || {
+			err "после отката версия ядра в базе $PM не совпадает со снимком: ожидалась '$_vr_ver', получена '$(installed_version_of "$CORE_PACKAGE")'"
+			return 1
+		}
 		[ -d "$_vr_b/core" ] && [ -f "$_vr_b/core/files.list" ] || {
 			err "снимок файлов ядра отсутствует"
 			return 1
@@ -1488,6 +1618,11 @@ verify_restored() { # verify_restored BACKUP_DIR
 		done <"$_vr_b/core/files.list"
 	fi
 	if [ "$(cat "$_vr_b/panel_present" 2>/dev/null || echo no)" = "yes" ]; then
+		_vr_ver=$(cat "$_vr_b/panel_version" 2>/dev/null || true)
+		[ "$(installed_version_of "$PANEL_PACKAGE")" = "$_vr_ver" ] || {
+			err "после отката версия панели в базе $PM не совпадает со снимком: ожидалась '$_vr_ver', получена '$(installed_version_of "$PANEL_PACKAGE")'"
+			return 1
+		}
 		[ -d "$_vr_b/panel" ] && [ -f "$_vr_b/panel/files.list" ] || {
 			err "снимок файлов панели отсутствует"
 			return 1
@@ -1550,6 +1685,31 @@ state_check() { # state_check SET
 	if [ "$CFG_PRESENT_BEFORE" -eq 1 ] && [ "$(config_sha)" != "$CFG_SHA_BEFORE" ]; then
 		err "SHA-256 /etc/config/csqtt изменился: профили/секреты/device_id должны сохраняться"
 		_sc_fail=1
+	fi
+	# [AUDIT BUG-09] Файлов недостаточно: на живом корне установка успешна
+	# только при запущенной службе и существующем csqtt0. Установщик не
+	# доказывает прохождение трафика (это вне его возможностей), но и не
+	# выдаёт «OK» при мёртвой службе. Офлайн-корень (CSQTT_ROOT) — явный SKIP.
+	if live_runtime; then
+		if service_running; then
+			if [ "$_sc_set" = "core" ] || [ "$_sc_set" = "both" ]; then
+				_sc_net=$(net_sys_dir)
+				_sc_i=0
+				while [ ! -e "$_sc_net/csqtt0" ] && [ "$_sc_i" -lt 5 ]; do
+					sleep 1
+					_sc_i=$((_sc_i + 1))
+				done
+				[ -e "$_sc_net/csqtt0" ] || {
+					err "интерфейс csqtt0 не создан ($_sc_net/csqtt0)"
+					_sc_fail=1
+				}
+			fi
+		else
+			err "служба csqtt не запущена (ubus не подтвердил running)"
+			_sc_fail=1
+		fi
+	else
+		info "проверки службы и csqtt0 пропущены: офлайн-корень (SKIP)"
 	fi
 	[ "$_sc_fail" -eq 0 ]
 }
@@ -2201,7 +2361,17 @@ cmd_install() { # cmd_install install|update
 		die "установка и восстановление не удались; ручной откат: $0 rollback --backup $BACKUP" "$EX_FAILED"
 	fi
 
-	[ "$INSTALL_SET" = panel ] || restart_service
+	_ci_service_failed=0
+	if [ "$INSTALL_SET" != panel ]; then
+		restart_service || _ci_service_failed=1
+	fi
+	if [ "$_ci_service_failed" -eq 1 ]; then
+		# [AUDIT BUG-02] Не «OK» и не откат: пакеты и конфигурация на месте,
+		# но движок не работает. Отдельный код и маркер для вызывающего.
+		err "пакеты установлены, но служба не запустилась; конфигурация и снимок $BACKUP сохранены"
+		emit "INSTALLED_SERVICE_FAILED|$INSTALL_SET"
+		exit "$EX_SERVICE"
+	fi
 
 	step "Проверка после установки"
 	if state_check "$INSTALL_SET"; then
@@ -2261,6 +2431,19 @@ cmd_uninstall() {
 	if [ "$INSTALL_SET" = core ] || [ "$INSTALL_SET" = both ]; then
 		_ui_selected="$_ui_selected $_ui_cores"
 	fi
+	# [AUDIT BUG-04] --purge удаляет общий /etc/config/csqtt (профили, секреты,
+	# device_id). Если после удаления выбранного набора остаются другие
+	# компоненты, конфиг им ещё нужен: блокируем до изменений.
+	if [ "$PURGE" -eq 1 ]; then
+		_ui_left=""
+		for _ui_lp in csqtt-core-2.1.9 csqtt-core-2.5.3 "$PANEL_PACKAGE"; do
+			case " $_ui_selected " in *" $_ui_lp "*) continue ;; esac
+			[ -z "$(installed_version_of "$_ui_lp")" ] || _ui_left="$_ui_left $_ui_lp"
+		done
+		if [ -n "$_ui_left" ]; then
+			die "--purge удалил бы общий /etc/config/csqtt, но остаются компоненты:${_ui_left}; удалите их вместе (--set both) или выполните удаление без --purge" "$EX_USAGE"
+		fi
+	fi
 	if [ "$DRY_RUN" -eq 1 ]; then
 		ok "dry-run: будут удалены: $_ui_selected"
 		ok "конфигурация /etc/config/csqtt сохраняется$([ "$PURGE" -eq 1 ] && echo ' (--purge: будет удалена)')"
@@ -2279,8 +2462,11 @@ cmd_uninstall() {
 	fi
 	confirm "Удалить $_ui_selected? Конфигурация сохраняется, если не указан --purge."
 	ensure_state
-	BACKUP=$(make_backup "uninstall") || true
-	[ -n "$BACKUP" ] && printf '%s\n' "$BACKUP" >"$STATE_DIR/last-backup"
+	# [AUDIT BUG-06] Снимок обязателен и для удаления: без него нет отката.
+	# Прежний `|| true` продолжал удаление без копии.
+	BACKUP=$(make_backup "uninstall") ||
+		die "не удалось создать снимок для отката; удаление отменено, изменения не вносились" "$EX_FAILED"
+	printf '%s\n' "$BACKUP" >"$STATE_DIR/last-backup"
 	# Служба работала до удаления? Тогда оставшееся ядро должно снова её
 	# поднять: postrm останавливает службу, а пользователь ждёт рабочий движок.
 	_ui_was_running=0
