@@ -27,8 +27,8 @@ install_csqtt() (
         esac
     else
         installer=server/install.sh
-        url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/d1c1fd2861b07c510fdb98dcb434fb03090cbfa4/server/install.sh
-        sha=b7fd760fd2ba01479aa8746c4e62321e23314dc8238346463e4cd44b1cfe049f
+        url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/ac173ff6c81d23f98406c98f7c5df1c83f4a44af/server/install.sh
+        sha=bc4a1677ff539a885d696f9ffe34d6d073cde60a2d5a462b03d246d993017809
         platform=VPS
         [ "$#" -gt 0 ] || set -- --menu
     fi
