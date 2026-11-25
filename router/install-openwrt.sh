@@ -9,7 +9,7 @@ set -eu
 umask 077
 
 url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh
-sha=164740a9fe96551938849fb1633364d1429766c175d465d020b54c8647116b4e
+sha=1623bac4b1970c9dffc0116e4f35407a9301611923be2d81f205dce96b19be72
 
 usage() {
     cat <<'EOF'
