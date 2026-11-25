@@ -72,7 +72,7 @@ fi
 
 base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/b7afa632a97e0d79aa7ee581ee4e698c87fd945f/server/v2.5.3
 backend=server-install.sh
-backend_sha=18a1f0e9ec0b94aea51b043f707248d188c0768b1ef1803d52d435ccc284df9f
+backend_sha=0ee60a65f602dca23030c28b984fdd9accc2006bd3a13e4899cb5ec085341a85
 source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -f -- "$work/$backend"; if [ -n "$binary" ]; then rm -f -- "$work/$binary"; fi; rmdir -- "$work"' EXIT
@@ -86,7 +86,7 @@ stage_asset() {
         curl --fail --silent --show-error --location --proto '=https' \
             --proto-redir '=https' --connect-timeout 15 --max-time 180 \
             --output "$work/$1" "$(if [ "$1" = "$backend" ]; then
-                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/1a8c60590ef2bae69c2534ee366da4f868e7bb23/server/backend.sh'
+                printf '%s' 'https://raw.githubusercontent.com/starkugz/csqtt-openwrt/a47cd82d2aac47d2e2306affe486ccc8d85a7110/server/backend.sh'
             else
                 printf '%s' "$base/$1"
             fi)"
