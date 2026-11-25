@@ -96,6 +96,7 @@ FORCE=0
 DRY_RUN=0
 BACKUP_CONFIG=1
 RESTORE_CONFIG=0
+SERVER_FAMILY=""
 
 LOG_FILE=""
 LOCK_FILE=""
@@ -355,6 +356,8 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
   --health-timeout N    Бюджет ожидания health-check, с (по умолчанию: $HEALTH_TIMEOUT).
   --no-backup-config    Не копировать каталог конфигурации.
   --restore-config      При rollback восстановить и конфигурацию из копии.
+  --server-family VER   Версия устанавливаемого сервера: 2.1.9 или 2.5.3.
+                        Обычно передаётся обёрткой; нужна для маркера данных.
   --dry-run, -n         Показать план без изменений.
   --yes, -y             Не спрашивать подтверждение.
   --force               Выполнить установку, даже если хеш уже совпадает.
@@ -367,6 +370,9 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
 Смена версии сервера (2.1.9 ↔ 2.5.3) поверх установленной не поддерживается:
 сначала удалите установленную версию CSQTT (uninstall сохраняет данные),
 затем установите нужную. Автоматической миграции базы нет.
+Если после удаления осталась база, установка версии с неподтверждённой
+совместимостью останавливается до изменений: данные нужно отдельно сохранить
+или убрать. Маркер версии данных: <config-dir>/.csqtt-server-version.
 EOF
 }
 
@@ -564,6 +570,77 @@ installed_is_legacy() {
     [ "$(sha256_of "$TARGET_BIN")" = 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3 ]
 }
 
+# Явная версия бинарника по его собственному выводу. Отсутствие совпадения с
+# известным SHA 2.1.9 ничего не доказывает, поэтому «не 2.1.9» версией не считается.
+detect_binary_family() {
+    local file="$1" out
+    [ -f "$file" ] || return 1
+    out=$("$file" --version 2>/dev/null | head -n 1) || true
+    case "$out" in
+    *' 2.1.9'*) printf '2.1.9\n' ;;
+    *' 2.5.3'*) printf '2.5.3\n' ;;
+    *) return 1 ;;
+    esac
+}
+
+# Версия данных, записанная при успешной установке. Нет файла или значение
+# неизвестно — совместимость не подтверждена.
+read_config_family() {
+    local f="$CONFIG_DIR/.csqtt-server-version" v
+    [ -f "$f" ] || return 1
+    v=$(tr -d '[:space:]' <"$f" 2>/dev/null) || return 1
+    case "$v" in
+    2.1.9 | 2.5.3) printf '%s\n' "$v" ;;
+    *) return 1 ;;
+    esac
+}
+
+# Первая база в каталоге конфигурации (если осталась от прежней установки).
+config_db_path() {
+    local p
+    for p in "$CONFIG_DIR/csqtt.db" "$CONFIG_DIR"/*.db; do
+        [ -f "$p" ] && { printf '%s\n' "$p"; return 0; }
+    done
+    return 1
+}
+
+resolve_candidate_family() {
+    if [ -n "$SERVER_FAMILY" ]; then
+        printf '%s\n' "$SERVER_FAMILY"
+        return 0
+    fi
+    if legacy_server_selected; then
+        printf '2.1.9\n'
+        return 0
+    fi
+    detect_binary_family "$CANDIDATE" || printf 'unknown\n'
+}
+
+resolve_installed_family() {
+    read_config_family && return 0
+    if installed_is_legacy; then
+        printf '2.1.9\n'
+        return 0
+    fi
+    detect_binary_family "$TARGET_BIN" || printf 'unknown\n'
+}
+
+family_label() {
+    case "$1" in
+    2.1.9 | 2.5.3) printf '%s' "$1" ;;
+    *) printf 'неизвестна (совместимость не подтверждена)' ;;
+    esac
+}
+
+# Маркер версии данных: переживает uninstall вместе с каталогом конфигурации и
+# позволяет отличить свою базу от чужой при следующей установке.
+write_config_family() {
+    local fam="$1"
+    [ -n "$fam" ] || fam=unknown
+    mkdir -p "$CONFIG_DIR" 2>/dev/null || return 1
+    printf '%s\n' "$fam" | write_file_atomic "$CONFIG_DIR/.csqtt-server-version" 0600
+}
+
 # Ближайший существующий каталог (для df по ещё не созданным путям). Только
 # чтение; ничего не создаёт.
 existing_ancestor_dir() {
@@ -616,7 +693,7 @@ check_free_space() {
 }
 
 preflight_check() {
-	local fail=0 hm cm magic sha actual installed_legacy cand_legacy
+	local fail=0 hm cm magic sha actual installed_family candidate_family data_family db
 	FOREIGN_BLOCK=0
 
 	if [ "$(uname -s)" != "Linux" ]; then
@@ -709,13 +786,26 @@ preflight_check() {
     # остановки службы: серверы 2.1.9 и 2.5.3 устанавливаются отдельно, база
     # автоматически не мигрирует. Повторная установка той же версии разрешена.
     if [ -f "$TARGET_BIN" ] && [ -f "$CANDIDATE" ]; then
-        installed_legacy=0
-        cand_legacy=0
-        installed_is_legacy && installed_legacy=1
-        legacy_server_selected && cand_legacy=1
-        if [ "$installed_legacy" -ne "$cand_legacy" ]; then
+        installed_family=$(resolve_installed_family)
+        candidate_family=$(resolve_candidate_family)
+        if [ "$installed_family" = "unknown" ] || [ "$candidate_family" = "unknown" ]; then
+            err "Не удалось подтвердить версию сервера (установлена: $(family_label "$installed_family"); запрошена: $(family_label "$candidate_family")). Установка поверх существующей остановлена до изменений. Сначала удалите установленную версию CSQTT, затем установите нужную."
+            fail=1
+        elif [ "$installed_family" != "$candidate_family" ]; then
             err "Смена версии CSQTT поверх установленной не поддерживается. Сначала удалите установленную версию CSQTT, затем установите нужную. Файлы и служба не изменялись."
             fail=1
+        fi
+    elif [ ! -f "$TARGET_BIN" ] && [ -f "$CANDIDATE" ]; then
+        # Данные могли остаться после uninstall. Установка версии с иной или
+        # неподтверждённой совместимостью останавливается до изменений; решение
+        # о судьбе данных принимает пользователь, миграции нет.
+        if db=$(config_db_path); then
+            data_family=$(read_config_family || printf 'unknown\n')
+            candidate_family=$(resolve_candidate_family)
+            if [ "$data_family" = "unknown" ] || [ "$candidate_family" = "unknown" ] || [ "$data_family" != "$candidate_family" ]; then
+                err "Обнаружена база прежней установки: $db (данные: $(family_label "$data_family"); устанавливаемая версия: $(family_label "$candidate_family")). Совместимость не подтверждена, установка остановлена до изменений. Для чистой установки отдельно сохраните или удалите эти данные (каталог $CONFIG_DIR) и повторите."
+                fail=1
+            fi
         fi
     fi
 	if ! check_web_port; then fail=1; fi
@@ -1797,6 +1887,9 @@ cmd_install() {
 
 	step "Проверка запуска и здоровья"
 	if wait_health; then
+		if ! write_config_family "$(resolve_candidate_family)"; then
+			warn "не удалось записать маркер версии данных $CONFIG_DIR/.csqtt-server-version; при следующей установке поверх этих данных потребуется подтверждение"
+		fi
 		record_current "$bdir" "$cand_sha"
 		show_web_access
 		ok "Установка завершена: служба активна, проверки пройдены"
@@ -1928,12 +2021,13 @@ cmd_uninstall() {
 		return 0
 	fi
 	# Версию снимаем до удаления бинарника, чтобы объяснить судьбу данных.
-	if installed_is_legacy; then
-		family="2.1.9"
-	elif [ -f "$TARGET_BIN" ]; then
-		family="2.5.3 (или другая сборка)"
-	else
-		family="неизвестна"
+	family=$(read_config_family || true)
+	if [ -z "$family" ]; then
+		if installed_is_legacy; then
+			family="2.1.9"
+		elif ! family=$(detect_binary_family "$TARGET_BIN"); then
+			family="unknown"
+		fi
 	fi
 	confirm "Остановить службу $SERVICE и удалить unit/хелперы/бинарник (конфигурация сохранится)?"
 	take_lock
@@ -1946,7 +2040,7 @@ cmd_uninstall() {
 		break
 	done
 	if [ -n "$kept" ]; then
-		warn "В $keep осталась база: $kept (снятая версия: $family)."
+		warn "В $keep осталась база: $kept (снятая версия: $(family_label "$family"))."
 		warn "Совместимость этих данных с другой версией сервера не подтверждена; автоматическая миграция не выполняется."
 		warn "Для чистой установки отдельно решите, что делать с этими данными: сохранить для текущей версии или убрать вручную."
 		emit "CSQTT_SERVER_UNINSTALL_DATA_KEPT|$kept"
@@ -1987,6 +2081,7 @@ parse_args() {
 		--backup-config) BACKUP_CONFIG=1; shift ;;
 		--no-backup-config) BACKUP_CONFIG=0; shift ;;
 		--restore-config) RESTORE_CONFIG=1; shift ;;
+		--server-family) SERVER_FAMILY="${2:-}"; shift 2 ;;
 		--dry-run | -n) DRY_RUN=1; shift ;;
 		--yes | -y) YES=1; shift ;;
 		--force) FORCE=1; shift ;;
@@ -2002,6 +2097,10 @@ parse_args() {
 			;;
 		esac
 	done
+	case "$SERVER_FAMILY" in
+	'' | 2.1.9 | 2.5.3) ;;
+	*) die "--server-family: ожидается 2.1.9 или 2.5.3 (получено: $SERVER_FAMILY)" "$EX_USAGE" ;;
+	esac
 }
 
 main() {
