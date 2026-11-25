@@ -99,6 +99,11 @@ RESTORE_CONFIG=0
 
 LOG_FILE=""
 LOCK_FILE=""
+LOCK_DIR=""
+LOCK_DIR_HELD=""
+LOCK_GATE=""
+LOCK_GATE_HELD=""
+LOCK_TOKEN=""
 NEW_WEB_CREDENTIALS=0
 GENERATE_WEB_CREDENTIALS=0
 NEW_WEB_USER=""
@@ -549,6 +554,57 @@ legacy_server_selected() {
     [ "$(sha256_of "$file")" = 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3 ]
 }
 
+# Ближайший существующий каталог (для df по ещё не созданным путям). Только
+# чтение; ничего не создаёт.
+existing_ancestor_dir() {
+    local p="$1"
+    while [ ! -d "$p" ]; do
+        case "$p" in
+        / | . | '') printf '/\n'; return 0 ;;
+        esac
+        p=$(dirname "$p")
+    done
+    printf '%s\n' "$p"
+}
+
+# Свободное место: требование по умолчанию 64 МиБ плюс размер входного
+# бинарника на каждом участвующем каталоге. Проверка только читает (df -Pk) и
+# выполняется до блокировки/записи. CSQTT_INSTALL_MIN_FREE_KB — явный порог для
+# небольших VPS и изолированных тестов.
+check_free_space() {
+    local need_kb="${CSQTT_INSTALL_MIN_FREE_KB:-65536}" cand_kb=0 dir avail seen=" " parent
+    case "$need_kb" in
+    '' | *[!0-9]*) err "CSQTT_INSTALL_MIN_FREE_KB: ожидается целое число KiB"; return 1 ;;
+    esac
+    if [ -n "$CANDIDATE" ] && [ -f "$CANDIDATE" ]; then
+        cand_kb=$((($(wc -c <"$CANDIDATE" 2>/dev/null || printf '0') + 1023) / 1024))
+    fi
+    need_kb=$((need_kb + cand_kb))
+    for parent in "$(dirname "$TARGET_BIN")" "$LIB_DIR" "$CONFIG_DIR" \
+        "$(dirname "$UNIT_PATH")" "$SYSCTL_DIR" "$RUNTIME_DIR" \
+        "$BACKUP_ROOT" "${STATE_DIR:-$BACKUP_ROOT/state}"; do
+        dir=$(existing_ancestor_dir "$parent")
+        case "$seen" in *" $dir "*) continue ;; esac
+        seen="$seen$dir "
+        if ! have df; then
+            err "не найдена команда df — невозможно проверить свободное место"
+            return 1
+        fi
+        avail=$(df -Pk "$dir" 2>/dev/null | awk 'END{print $4}' || true)
+        case "$avail" in
+        '' | *[!0-9]*)
+            err "не удалось определить свободное место для $dir (df -Pk)"
+            return 1
+            ;;
+        esac
+        if [ "$avail" -lt "$need_kb" ]; then
+            err "недостаточно свободного места в $dir: доступно $((avail / 1024)) МиБ, нужно не менее $((need_kb / 1024)) МиБ (включая бинарник и резервную копию)"
+            return 1
+        fi
+    done
+    return 0
+}
+
 preflight_check() {
 	local fail=0 hm cm magic sha actual
 	FOREIGN_BLOCK=0
@@ -581,6 +637,10 @@ preflight_check() {
 	for cmd in python3 tar od sysctl "$SS_BIN"; do
 		if ! have "$cmd"; then err "не найдена обязательная команда $cmd"; fail=1; fi
 	done
+
+	if ! check_free_space; then
+		fail=1
+	fi
 
 	if ! check_desired_file; then
 		fail=1
@@ -669,10 +729,160 @@ ensure_state() {
 take_lock() {
 	ensure_state
 	LOCK_FILE="$STATE_DIR/lock"
-	exec 9>"$LOCK_FILE"
-	if ! flock -n 9 2>/dev/null; then
-		die "другой запуск $TOOL_NAME уже выполняется ($LOCK_FILE)" "$EX_LOCKED"
+	# flock есть не на каждой минимальной системе. Используем оба механизма,
+	# когда flock доступен: flock сериализует новые запуски, mkdir-блокировка
+	# остаётся видимой для систем без flock (совместимость режимов).
+	# CSQTT_NO_FLOCK=1 заставляет только mkdir-путь (изолированные тесты).
+	if [ "${CSQTT_NO_FLOCK:-0}" != "1" ] && command -v flock >/dev/null 2>&1; then
+		exec 9>"$LOCK_FILE"
+		if ! flock -n 9 2>/dev/null; then
+			die "другой запуск $TOOL_NAME уже выполняется ($LOCK_FILE)" "$EX_LOCKED"
+		fi
 	fi
+	acquire_mkdir_lock
+}
+
+# Владелец блокировки: PID, время старта процесса (поле 22 /proc/PID/stat) и
+# boot_id. Одного PID недостаточно: он может быть переиспользован. Запись
+# владельца создаётся атомарно (owner.tmp → owner) внутри каталога блокировки.
+_lock_boot_id() {
+	cat /proc/sys/kernel/random/boot_id 2>/dev/null || true
+}
+
+_lock_proc_start() {
+	local pid="$1" rest
+	case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+	[ -r "/proc/$pid/stat" ] || return 1
+	rest=$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null) || return 1
+	printf '%s\n' "$rest" | awk '{print $20}'
+}
+
+_lock_owner_write() { # каталог, токен
+	local dir="$1" token="$2" tmp="$1/owner.tmp.$$"
+	{
+		printf 'pid=%s\n' "$$"
+		printf 'start=%s\n' "$(_lock_proc_start "$$" || true)"
+		printf 'boot=%s\n' "$(_lock_boot_id)"
+		printf 'token=%s\n' "$token"
+	} >"$tmp" 2>/dev/null && mv -f -- "$tmp" "$dir/owner" 2>/dev/null && return 0
+	rm -f -- "$tmp" 2>/dev/null || true
+	return 1
+}
+
+_lock_owner_field() { # каталог, ключ
+	[ -f "$1/owner" ] || return 0
+	awk -F= -v k="$2" '$1==k {print substr($0, index($0, "=") + 1); exit}' "$1/owner" 2>/dev/null || true
+}
+
+# Живой ли владелец каталога. Старый формат (только lock.d/pid) поддерживается:
+# живой PID считается владельцем, мёртвый — устаревшей блокировкой.
+_lock_owner_alive() {
+	local pid start boot cur_start cur_boot
+	pid=$(_lock_owner_field "$1" pid)
+	if [ -z "$pid" ] && [ -f "$1/pid" ]; then
+		pid=$(cat "$1/pid" 2>/dev/null || true)
+	fi
+	case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$pid" -gt 1 ] || return 1
+	kill -0 "$pid" 2>/dev/null || return 1
+	start=$(_lock_owner_field "$1" start)
+	[ -n "$start" ] || return 0
+	cur_start=$(_lock_proc_start "$pid" || true)
+	[ "$cur_start" = "$start" ] || return 1
+	boot=$(_lock_owner_field "$1" boot)
+	if [ -n "$boot" ]; then
+		cur_boot=$(_lock_boot_id)
+		[ -z "$cur_boot" ] || [ "$boot" = "$cur_boot" ] || return 1
+	fi
+	return 0
+}
+
+# Короткий gate-мьютекс сериализует создание lock.d и удаление устаревшей
+# блокировки: окно «каталог уже есть, владелец ещё не записан» не наблюдаемо
+# другими запусками. Gate держится миллисекунды; ожидание ограничено.
+_lock_gate_acquire() {
+	local i=0
+	while ! mkdir "$LOCK_GATE" 2>/dev/null; do
+		if _lock_owner_alive "$LOCK_GATE"; then
+			[ "$i" -lt 100 ] || die "другой запуск $TOOL_NAME удерживает $LOCK_GATE" "$EX_LOCKED"
+		elif [ "$i" -ge 10 ]; then
+			# gate без живого владельца (обрыв между mkdir и записью).
+			rm -rf -- "$LOCK_GATE" 2>/dev/null || true
+		fi
+		sleep 0.1
+		i=$((i + 1))
+		[ "$i" -le 120 ] || die "не удалось занять $LOCK_GATE" "$EX_LOCKED"
+	done
+	LOCK_GATE_HELD=1
+	if ! _lock_owner_write "$LOCK_GATE" "$LOCK_TOKEN"; then
+		rm -rf -- "$LOCK_GATE" 2>/dev/null || true
+		LOCK_GATE_HELD=""
+		die "не удалось записать владельца $LOCK_GATE" "$EX_LOCKED"
+	fi
+}
+
+_lock_gate_release() {
+	[ -n "${LOCK_GATE_HELD:-}" ] || return 0
+	if [ "$(_lock_owner_field "$LOCK_GATE" token)" = "$LOCK_TOKEN" ]; then
+		rm -rf -- "$LOCK_GATE" 2>/dev/null || true
+	fi
+	LOCK_GATE_HELD=""
+}
+
+acquire_mkdir_lock() {
+	local _owner _waited
+	LOCK_DIR="$STATE_DIR/lock.d"
+	LOCK_GATE="$STATE_DIR/lock.gate"
+	LOCK_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
+	[ "${#LOCK_TOKEN}" -eq 32 ] || die "не удалось создать токен блокировки" "$EX_LOCKED"
+
+	_lock_gate_acquire
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		# Каталог мог только что создать процесс прежней версии (окно между
+		# mkdir и записью owner/pid). Коротко ждём владельца: сносить чужую
+		# активную блокировку нельзя. Пустой каталог после настоящего обрыва
+		# остаётся устаревшим и перехватывается после этого ограниченного окна.
+		_waited=0
+		while [ ! -e "$LOCK_DIR/owner" ] && [ ! -e "$LOCK_DIR/pid" ]; do
+			[ "$_waited" -lt 20 ] || break
+			sleep 0.1
+			_waited=$((_waited + 1))
+			[ -d "$LOCK_DIR" ] || break
+		done
+		if _lock_owner_alive "$LOCK_DIR"; then
+			_owner=$(_lock_owner_field "$LOCK_DIR" pid)
+			[ -n "$_owner" ] || _owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+			_lock_gate_release
+			die "другой запуск $TOOL_NAME уже выполняется (pid ${_owner:-unknown}, $LOCK_DIR)" \
+				"$EX_LOCKED"
+		fi
+		# Устаревшая блокировка: под gate других создателей нет.
+		rm -rf -- "$LOCK_DIR" 2>/dev/null || true
+		if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+			_lock_gate_release
+			die "не удалось создать блокировку $LOCK_DIR" "$EX_LOCKED"
+		fi
+	fi
+	if ! _lock_owner_write "$LOCK_DIR" "$LOCK_TOKEN"; then
+		rm -rf -- "$LOCK_DIR" 2>/dev/null || true
+		_lock_gate_release
+		die "не удалось записать владельца $LOCK_DIR" "$EX_LOCKED"
+	fi
+	LOCK_DIR_HELD="$LOCK_DIR"
+	_lock_gate_release
+	trap 'release_mkdir_lock' EXIT
+	trap 'release_mkdir_lock; exit 130' INT
+	trap 'release_mkdir_lock; exit 143' TERM
+}
+
+release_mkdir_lock() {
+	_lock_gate_release
+	[ -n "${LOCK_DIR_HELD:-}" ] || return 0
+	# Удаляем только собственную блокировку: token должен совпасть.
+	if [ "$(_lock_owner_field "$LOCK_DIR_HELD" token)" = "$LOCK_TOKEN" ]; then
+		rm -rf -- "$LOCK_DIR_HELD" 2>/dev/null || true
+	fi
+	LOCK_DIR_HELD=""
 }
 
 confirm() {
@@ -1009,7 +1219,11 @@ $start
 Restart=on-failure
 RestartSec=3
 KillMode=control-group
-TimeoutStartSec=30
+# [BUG-05] Хелпер ожидания WAN ждёт не дольше 90 с (ExecStartPre).
+# TimeoutStartSec обязан быть больше этого ожидания плюс запуск tun-recover,
+# иначе systemd убивает helper раньше сети и юнит уходит в failed на медленном
+# WAN.
+TimeoutStartSec=100
 TimeoutStopSec=5
 
 [Install]
@@ -1020,19 +1234,24 @@ UNITEOF
 write_file_atomic() { # путь, права, содержимое(stdin)
 	local path="$1" mode="$2" tmp
 	tmp="$(dirname "$path")/.csqtt-install.$$.tmp"
-	cat >"$tmp"
-	chmod "$mode" "$tmp"
-	mv -f -- "$tmp" "$path"
+	# Функция вызывается в condition-контексте (`|| return 1`), где set -e не
+	# действует, поэтому каждый шаг проверяем явно: сбой записи/прав не должен
+	# превращаться в пустой или частичный файл, замаскированный успешным mv.
+	cat >"$tmp" || { rm -f -- "$tmp" 2>/dev/null || true; return 1; }
+	chmod "$mode" "$tmp" || { rm -f -- "$tmp" 2>/dev/null || true; return 1; }
+	mv -f -- "$tmp" "$path" || { rm -f -- "$tmp" 2>/dev/null || true; return 1; }
 }
 
 prepare_new_web_credentials() {
-    [ "$GENERATE_WEB_CREDENTIALS" -eq 1 ] || return 0
-    [ ! -e "$ENV_FILE" ] || return 0
-    NEW_WEB_USER="csqtt_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
-    NEW_WEB_PASS=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
-    printf 'CSQTT_WEB_USER=%s\nCSQTT_WEB_PASS=%s\n' "$NEW_WEB_USER" "$NEW_WEB_PASS" |
-        write_file_atomic "$ENV_FILE" 0600
-    NEW_WEB_CREDENTIALS=1
+	[ "$GENERATE_WEB_CREDENTIALS" -eq 1 ] || return 0
+	[ ! -e "$ENV_FILE" ] || return 0
+	mkdir -p "$(dirname "$ENV_FILE")" 2>/dev/null || return 1
+	chmod 0700 "$(dirname "$ENV_FILE")" 2>/dev/null || true
+	NEW_WEB_USER=$(python3 -c 'import secrets; print("csqtt_" + secrets.token_hex(4))') || return 1
+	NEW_WEB_PASS=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') || return 1
+	printf 'CSQTT_WEB_USER=%s\nCSQTT_WEB_PASS=%s\n' "$NEW_WEB_USER" "$NEW_WEB_PASS" |
+		write_file_atomic "$ENV_FILE" 0600 || return 1
+	NEW_WEB_CREDENTIALS=1
 }
 
 show_web_access() {
@@ -1054,34 +1273,36 @@ show_web_access() {
 
 install_service_files() {
 	step "Укладка бинарника, хелперов и unit"
-	mkdir -p "$(dirname "$TARGET_BIN")" "$LIB_DIR" "$CONFIG_DIR" "$SYSCTL_DIR" "$(dirname "$UNIT_PATH")" "$RUNTIME_DIR"
+	mkdir -p "$(dirname "$TARGET_BIN")" "$LIB_DIR" "$CONFIG_DIR" "$SYSCTL_DIR" "$(dirname "$UNIT_PATH")" "$RUNTIME_DIR" || {
+		err "не удалось создать каталоги установки"
+		return 1
+	}
 	chmod 0755 "$(dirname "$TARGET_BIN")" "$LIB_DIR" 2>/dev/null || true
 	chmod 0700 "$CONFIG_DIR" 2>/dev/null || true
-	prepare_new_web_credentials
 	if [ -n "$DESIRED" ]; then
-		mkdir -p "$(dirname "$DESIRED")"
+		mkdir -p "$(dirname "$DESIRED")" || return 1
 	fi
 
 	# Бинарник: атомарная замена.
-	write_file_atomic "$TARGET_BIN" 0755 <"$CANDIDATE"
+	write_file_atomic "$TARGET_BIN" 0755 <"$CANDIDATE" || return 1
 
-	tun_recovery_helper_content | write_file_atomic "$LIB_DIR/tun-recover.sh" 0755
+	tun_recovery_helper_content | write_file_atomic "$LIB_DIR/tun-recover.sh" 0755 || return 1
 	if [ "$NO_NAT" -eq 0 ]; then
-		network_helper_content | write_file_atomic "$LIB_DIR/network-up.sh" 0755
+		network_helper_content | write_file_atomic "$LIB_DIR/network-up.sh" 0755 || return 1
 	else
 		# no-nat: хелпер не нужен; убираем возможный остаток от прежней NAT-установки.
-		rm -f -- "$LIB_DIR/network-up.sh"
+		rm -f -- "$LIB_DIR/network-up.sh" || return 1
 	fi
 
 	if [ "$NO_NAT" -eq 0 ]; then
-		sysctl_content_forwarding | write_file_atomic "$SYSCTL_FORWARD_FILE" 0644
-		sysctl_content_udp_buffers | write_file_atomic "$SYSCTL_UDP_FILE" 0644
+		sysctl_content_forwarding | write_file_atomic "$SYSCTL_FORWARD_FILE" 0644 || return 1
+		sysctl_content_udp_buffers | write_file_atomic "$SYSCTL_UDP_FILE" 0644 || return 1
 	else
 		# no-nat: никаких host-wide sysctl от этого экземпляра.
-		rm -f -- "$SYSCTL_FORWARD_FILE" "$SYSCTL_UDP_FILE"
+		rm -f -- "$SYSCTL_FORWARD_FILE" "$SYSCTL_UDP_FILE" || return 1
 	fi
 
-	unit_content | write_file_atomic "$UNIT_PATH" 0644
+	unit_content | write_file_atomic "$UNIT_PATH" 0644 || return 1
 
 	# Применяем sysctl на живой системе (мягко), только если экземпляр владеет NAT.
 	if [ "$NO_NAT" -eq 0 ] && have "$SYSCTL_BIN"; then
@@ -1089,8 +1310,12 @@ install_service_files() {
 		"$SYSCTL_BIN" -p "$SYSCTL_UDP_FILE" >/dev/null 2>&1 || warn "не удалось применить sysctl CSQTT UDP"
 	fi
 
-	"$SYSTEMCTL_BIN" daemon-reload >/dev/null 2>&1 || die "systemctl daemon-reload завершился ошибкой" "$EX_INTERNAL"
+	"$SYSTEMCTL_BIN" daemon-reload >/dev/null 2>&1 || {
+		err "systemctl daemon-reload завершился ошибкой"
+		return 1
+	}
 	"$SYSTEMCTL_BIN" enable "$SERVICE" >/dev/null 2>&1 || warn "systemctl enable $SERVICE не удался"
+	return 0
 }
 
 remove_service_files() {
@@ -1387,8 +1612,8 @@ cmd_preflight() {
 }
 
 auto_rollback() {
-	local bdir="$1"
-	warn "health-check не пройден — автоматический откат к предыдущему состоянию"
+	local bdir="$1" reason="${2:-health-check не пройден}"
+	warn "$reason — автоматический откат к предыдущему состоянию"
 	if rollback_to_backup "$bdir" no; then
 		if [ "$NEW_WEB_CREDENTIALS" -eq 1 ]; then rm -f -- "$ENV_FILE"; fi
 		ok "Предыдущее состояние восстановлено: $bdir"
@@ -1453,12 +1678,20 @@ cmd_install() {
 	bdir=$(make_backup "$mode")
 	step "Резервная копия создана: $bdir"
 
-	install_service_files
+	if ! prepare_new_web_credentials; then
+		err "не удалось создать новые web-данные (env 0600)"
+		auto_rollback "$bdir" "не удалось создать новые web-данные"
+	fi
+	# Ошибка укладки файлов приводит к точному откату, а не к частичной установке.
+	if ! install_service_files; then
+		err "не удалось разложить файлы службы"
+		auto_rollback "$bdir" "ошибка укладки файлов службы"
+	fi
 
 	step "Запуск службы $SERVICE"
 	if ! "$SYSTEMCTL_BIN" restart "$SERVICE" >/dev/null 2>&1; then
 		err "systemctl restart $SERVICE завершился ошибкой"
-		auto_rollback "$bdir"
+		auto_rollback "$bdir" "служба не запустилась"
 	fi
 
 	step "Проверка запуска и здоровья"

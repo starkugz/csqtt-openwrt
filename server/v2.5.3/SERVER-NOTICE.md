@@ -14,13 +14,17 @@ Noncommercial 1.0.0, раздел «Notices»).
 
 PolyForm Noncommercial License 1.0.0 — полный текст в [`LICENSE`](LICENSE).
 
-> Required Notice: Copyright 2026 amurcanov
+> Required Notice: Copyright 2026 amurcanov.
+> Required Notice: Commercial use of CSQTT requires a separate written license from the licensor.
+> Required Notice: Redistributions and derivative works must retain attribution to the original CSQTT project and these notices.
 
 ## Исходный проект и ядро
 
 - **Ядро CSQTT** (протокол, транспорт, пул профилей, CAPTCHA) — оригинальная
   разработка проекта CSQTT, автор **amurcanov** (focsq-совместимое ядро).
-  Ядро этого выпуска — **2.5.3**; прежние ядра 2.1.9/2.5.1 в выпуск не входят.
+  Серверное ядро этого выпуска — **2.5.3** (amd64, arm64, armv7); сервер
+  **2.1.9** (amd64) поставляется как оригинальный бинарник. Клиентские ядра
+  2.1.9/2.5.1 в серверный комплект не входят.
 - Данная редакция **star-panel-csqtt** добавляет интеграцию в OpenWrt
   (init-скрипт, UCI-схема, упаковка `.apk`) и панель LuCI (JS-вью, rpcd-ucode),
   а также локальные исправления. Автор редакции — **starkugz**. Изменения
