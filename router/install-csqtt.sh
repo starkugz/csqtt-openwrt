@@ -36,10 +36,13 @@
 # SHA256SUMS из выпуска и передаются менеджеру пакетов.
 #
 # Коды возврата:
-#   0  успех / проверка пройдена
+#   0  успех / проверка пройдена; установка без профиля или с выключенным
+#      подключением — тоже 0 с маркером NEEDS_SETUP (пакеты установлены,
+#      настройка нужна позже) и с прежним маркером OK для LuCI
 #   2  ошибка аргументов или нужен --set/--yes
 #   20 ошибка до изменений (манифест, SHA, ABI, зависимости, место, выпуск)
-#   30 проверка после установки не прошла, прежнее состояние восстановлено
+#   30 проверка после установки не прошла; прежнее состояние восстановлено
+#      либо возврат неполный (RESTORE_INCOMPLETE) и нужно ручное решение
 #   31 восстановить/удалить не удалось — нужна ручная команда
 #   32 пакеты установлены, но служба/интерфейс не поднялись (не OK и не откат)
 #   40 занято другим запуском
@@ -116,6 +119,7 @@ TAG=""
 BACKUP=""
 CFG_SHA_BEFORE=""
 CFG_PRESENT_BEFORE=0
+RESTORE_INCOMPLETE=""
 LOCKED=0
 
 log() { printf '[+] %s\n' "$*"; }
@@ -216,6 +220,11 @@ usage() {
   CSQTT_INSTALLER_PLAN_FILE — куда сохранить результат проверки (план установки)
   CSQTT_ROOT — корень OpenWrt (только для офлайн-проверок)
   CSQTT_INSTALLER_STATE_DIR — каталог снимков состояния
+  CSQTT_FETCH_BUDGET — общий предел загрузки в секундах (60; 0 — без общего
+                             предела, но каждая попытка ограничена 45 с)
+  CSQTT_FETCH_ATTEMPTS — попыток на загрузчик, 1–3 (2)
+  CSQTT_FETCH_SKIP — не использовать перечисленные загрузчики (диагностика)
+  CSQTT_INSTALLER_READY_TIMEOUT — ограниченное ожидание службы/TUN, с (30)
 
 Без owner/repo/tag выпуск BLOCKED (код 60); URL не выдумывается, строка
 latest как тег не принимается. Оба менеджера пакетов или ни одного —
@@ -552,6 +561,7 @@ fetch_classify() { # TOOL RC MESSAGE
 	uclient-fetch:8 | wget:8 | curl:22) _kind=http ;;
 	uclient-fetch:5 | curl:35 | curl:51 | curl:58 | curl:59 | curl:60) _kind=tls ;;
 	uclient-fetch:4 | uclient-fetch:6 | uclient-fetch:7 | curl:6 | curl:7 | curl:28) _kind=network ;;
+	*:124 | *:137) _kind=network ;;
 	*)
 		case "$3" in
 		*"HTTP error"* | *"HTTP/"*" 4"* | *"HTTP/"*" 5"* | *"ERROR 4"* | *"ERROR 5"* | *"server returned"*)
@@ -579,11 +589,12 @@ fetch_classify() { # TOOL RC MESSAGE
 	return 0
 }
 
-fetch_try() { # fetch_try TOOL ARGS...
+fetch_try() { # fetch_try TOOL CAP ARGS...
 	_fetch_tool=$1
-	shift
+	_fetch_cap=$2
+	shift 2
 	: >"$FETCH_ERRFILE" 2>/dev/null || true
-	fetch_hard "$@" 2>"$FETCH_ERRFILE"
+	fetch_hard_cap "$_fetch_cap" "$@" 2>"$FETCH_ERRFILE"
 	_fetch_rc=$?
 	[ "$_fetch_rc" -eq 0 ] && return 0
 	_fetch_msg=""
@@ -592,8 +603,9 @@ fetch_try() { # fetch_try TOOL ARGS...
 	return "$_fetch_rc"
 }
 
-# Тот же бинарник под другим именем (на OpenWrt /usr/bin/wget — симлинк на
-# uclient-fetch). Повторять им загрузку бессмысленно: результат тот же.
+# Тот же бинарник под другим именем (например, /usr/bin/wget — симлинк на
+# uclient-fetch) не является независимой альтернативой: повторять им загрузку
+# бессмысленно, результат будет тот же.
 fetch_tool_id() { # fetch_tool_id TOOL -> путь бинарника
 	_fti_path=$(command -v "$1" 2>/dev/null) || return 1
 	[ -n "$_fti_path" ] || return 1
@@ -615,13 +627,22 @@ fetch_attempts() {
 # Жёсткий предел одной попытки: -T/--max-time самого загрузчика не спасают,
 # если зависла резолвинг-функция. timeout есть не везде (BusyBox без -k),
 # поэтому поддержка проверяется один раз; без неё остаются штатные тайм-ауты.
-fetch_hard() {
+# Предел передаётся вызывающим: он не больше доли общего бюджета и остатка.
+fetch_hard_cap() { # fetch_hard_cap SECONDS CMD...
+	_fhc=$1
+	shift
+	case "$_fhc" in '' | *[!0-9]*) _fhc=45 ;; esac
+	[ "$_fhc" -ge 1 ] || _fhc=1
 	if command -v timeout >/dev/null 2>&1 &&
 		timeout -k 1 1 true >/dev/null 2>&1; then
-		timeout -k 2 45 "$@"
+		timeout -k 2 "$_fhc" "$@"
 	else
 		"$@"
 	fi
+}
+
+fetch_hard() { # fetch_hard CMD... (совместимость: прежний предел 45 с)
+	fetch_hard_cap 45 "$@"
 }
 
 fetch_expired() {
@@ -631,91 +652,192 @@ fetch_expired() {
 	[ "$_now" -ge "$_FETCH_STOP" ]
 }
 
-# Один загрузчик: до ATTEMPTS попыток, успех только при непустом OUT.
-# Дубликат уже испробованного бинарника пропускается.
-fetch_one() { # fetch_one TOOL ATTEMPTS OUT CMD...
-	_fo_tool=$1
-	_fo_n=$2
-	_fo_out=$3
-	shift 3
-	_fo_id=$(fetch_tool_id "$_fo_tool" 2>/dev/null) || _fo_id=""
-	if [ -n "$_fo_id" ]; then
-		case " $_FETCH_SEEN " in
-		*" $_fo_id "*) return 1 ;;
-		esac
-		_FETCH_SEEN="$_FETCH_SEEN $_fo_id"
-	fi
-	_fo_rc=1
-	_fo_i=1
-	while [ "$_fo_i" -le "$_fo_n" ]; do
-		fetch_expired && break
-		# Пустой файл до попытки: rc=0 без записанного тела — не успех.
-		rm -f "$_fo_out" 2>/dev/null || true
-		: >"$_fo_out" 2>/dev/null || true
-		fetch_try "$_fo_tool" "$@"
-		_fo_rc=$?
-		if [ "$_fo_rc" -eq 0 ]; then
-			[ -s "$_fo_out" ] && return 0
-			[ -n "$FETCH_ERR" ] || FETCH_ERR=empty
-			_fo_rc=1
-		fi
-		case "$FETCH_ERR" in
-		network | empty) ;;
-		*) return "$_fo_rc" ;;
-		esac
-		_fo_i=$((_fo_i + 1))
-		[ "$_fo_i" -le "$_fo_n" ] && { sleep 1 2>/dev/null || true; }
-	done
-	return "$_fo_rc"
+# Остаток общего бюджета в секундах (0 — не задан или уже истёк).
+fetch_remaining() {
+	[ "${_FETCH_STOP:-0}" -gt 0 ] || {
+		printf '%s\n' 0
+		return 0
+	}
+	_now=$(date +%s 2>/dev/null) || _now=0
+	[ "$_now" -gt 0 ] || {
+		printf '%s\n' 0
+		return 0
+	}
+	_left=$((_FETCH_STOP - _now))
+	[ "$_left" -gt 0 ] && printf '%s\n' "$_left" || printf '%s\n' 0
 }
 
+# Краткий прогресс только для человека: в stderr и только на терминале или по
+# явному CSQTT_INSTALLER_PROGRESS=1. Машинный stdout (маркеры RPC) не трогаем;
+# URL не печатаем — в нём могут быть параметры выпуска.
+fetch_progress() {
+	if [ "${CSQTT_INSTALLER_PROGRESS:-0}" = "1" ] || [ -t 2 ]; then
+		printf '[i] %s\n' "$*" >&2
+	fi
+}
+
+fetch_tool_kind() { # fetch_tool_kind TOOL -> http|tls|network|empty
+	case "$1" in
+	curl) printf '%s' "$_fk_curl" ;;
+	wget) printf '%s' "$_fk_wget" ;;
+	uclient-fetch) printf '%s' "$_fk_uclient" ;;
+	esac
+}
+
+fetch_tool_kind_set() { # fetch_tool_kind_set TOOL KIND
+	case "$1" in
+	curl) _fk_curl=$2 ;;
+	wget) _fk_wget=$2 ;;
+	uclient-fetch) _fk_uclient=$2 ;;
+	esac
+}
+
+# Одна попытка конкретным инструментом с пределом CAP. Успех — только
+# непустой файл: rc=0 без тела не считается загрузкой.
+fetch_once() { # fetch_once TOOL CAP URL OUT
+	_fon_out=$4
+	rm -f "$_fon_out" 2>/dev/null || true
+	: >"$_fon_out" 2>/dev/null || true
+	_fon_cap=$2
+	_fon_ct=15
+	[ "$_fon_ct" -gt "$_fon_cap" ] && _fon_ct=$_fon_cap
+	[ "$_fon_ct" -ge 1 ] || _fon_ct=1
+	case "$1" in
+	curl)
+		fetch_try curl "$_fon_cap" curl -fsSL \
+			--connect-timeout "$_fon_ct" --max-time "$_fon_cap" "$3" -o "$_fon_out"
+		;;
+	wget)
+		fetch_try wget "$_fon_cap" wget -T "$_fon_cap" -O "$_fon_out" "$3"
+		;;
+	uclient-fetch)
+		fetch_try uclient-fetch "$_fon_cap" uclient-fetch -T "$_fon_cap" -O "$_fon_out" "$3"
+		;;
+	*)
+		return 127
+		;;
+	esac
+	_fon_rc=$?
+	if [ "$_fon_rc" -eq 0 ]; then
+		[ -s "$_fon_out" ] && return 0
+		case "$FETCH_ERR" in
+		http | tls) ;;
+		*) FETCH_ERR=empty ;;
+		esac
+		return 1
+	fi
+	return "$_fon_rc"
+}
+
+# Порядок: curl первым (на устройстве он скачал манифест, когда uclient-fetch
+# исчерпал свой тайм-аут), затем wget, затем uclient-fetch. Сначала по одной
+# попытке каждым РАЗНЫМ бинарником, и только потом повторы сетевых сбоев:
+# общий бюджет не отдаётся первому инструменту целиком.
 fetch() { # fetch URL OUT
 	FETCH_ERR=""
 	FETCH_DETAIL=""
+	FETCH_BUDGET=0
 	_FETCH_SEEN=""
+	_FETCH_BUDGET_HIT=0
 	_fetch_rc=127
-	_fetch_tried=0
 	mkdir -p "$TMPBASE" 2>/dev/null || true
 	FETCH_ERRFILE="$TMPBASE/.csqtt-fetch.$$"
 	_attempts=$(fetch_attempts)
 	# Общий бюджет времени: меню не должно «висеть» на трёх загрузчиках с
-	# повторами. 0 отключает ограничение (только для диагностики).
+	# повторами. 0 отключает ограничение (только для диагностики). Явно
+	# слишком малый бюджет честно исчерпывается, а не обходится.
 	_budget=${CSQTT_FETCH_BUDGET:-60}
 	case "$_budget" in '' | *[!0-9]*) _budget=60 ;; esac
+	FETCH_BUDGET=$_budget
+	_start=0
 	_FETCH_STOP=0
 	if [ "$_budget" -gt 0 ]; then
-		_start=$(date +%s 2>/dev/null) || _start=""
-		[ -n "$_start" ] && _FETCH_STOP=$((_start + _budget))
+		_start=$(date +%s 2>/dev/null) || _start=0
+		[ "$_start" -gt 0 ] && _FETCH_STOP=$((_start + _budget))
 	fi
-	# uclient-fetch: код 8 — подтверждённый HTTP-ответ, 4 — связь, 5 — TLS.
-	# Подавление вывода (-q) не используется: именно текст ошибки содержит
-	# подтверждённый код HTTP. Вывод инструмента уходит в отдельный файл и
-	# пользователю не показывается.
-	if command -v uclient-fetch >/dev/null 2>&1; then
-		_fetch_tried=1
-		fetch_one uclient-fetch "$_attempts" "$2" uclient-fetch -T 15 -O "$2" "$1"
-		_fetch_rc=$?
-		[ "$_fetch_rc" -eq 0 ] && { rm -f "$FETCH_ERRFILE"; return 0; }
-	fi
-	# wget: BusyBox/GNU, без -t/--tries (на OpenWrt это uclient-fetch).
-	if command -v wget >/dev/null 2>&1; then
-		_fetch_tried=1
-		fetch_one wget "$_attempts" "$2" wget -T 30 -O "$2" "$1"
-		_fetch_rc=$?
-		[ "$_fetch_rc" -eq 0 ] && { rm -f "$FETCH_ERRFILE"; return 0; }
-	fi
-	if command -v curl >/dev/null 2>&1; then
-		_fetch_tried=1
-		fetch_one curl "$_attempts" "$2" curl -fsSL --connect-timeout 15 --max-time 90 "$1" -o "$2"
-		_fetch_rc=$?
-		[ "$_fetch_rc" -eq 0 ] && { rm -f "$FETCH_ERRFILE"; return 0; }
-	fi
-	rm -f "$2" "$FETCH_ERRFILE"
-	if [ "$_fetch_tried" = 0 ]; then
+	_fk_curl=""
+	_fk_wget=""
+	_fk_uclient=""
+	_skip=" ${CSQTT_FETCH_SKIP:-} "
+	_tools=""
+	_n=0
+	for _t in curl wget uclient-fetch; do
+		case "$_skip" in *" $_t "*) continue ;; esac
+		command -v "$_t" >/dev/null 2>&1 || continue
+		_tid=$(fetch_tool_id "$_t" 2>/dev/null) || _tid=""
+		if [ -n "$_tid" ]; then
+			case " $_FETCH_SEEN " in
+			*" $_tid "*)
+				fetch_progress "загрузка: $_t — тот же бинарник, что уже проверен; пропуск"
+				continue
+				;;
+			esac
+			_FETCH_SEEN="$_FETCH_SEEN $_tid"
+		fi
+		_tools="$_tools $_t"
+		_n=$((_n + 1))
+	done
+	if [ "$_n" -eq 0 ]; then
 		FETCH_ERR=nodl
 		return 127
 	fi
-	return "$_fetch_rc"
+	_share=0
+	if [ "$_budget" -gt 0 ]; then
+		_share=$((_budget / _n))
+		[ "$_share" -ge 3 ] || _share=3
+	fi
+	# Без общего предела (CSQTT_FETCH_BUDGET=0) попытка всё равно не может
+	# быть бесконечной: зависший DNS/сокет не должен держать меню вечно.
+	# 45 с — прежний штатный предел одной попытки (fetch_hard).
+	_attempt_cap=45
+	_try_no=0
+	_total=$((_n * _attempts))
+	_round=1
+	while [ "$_round" -le "$_attempts" ]; do
+		for _t in $_tools; do
+			if [ "$_round" -gt 1 ]; then
+				_k=$(fetch_tool_kind "$_t")
+				case "$_k" in network | empty) ;; *) continue ;; esac
+			fi
+			if fetch_expired; then
+				_FETCH_BUDGET_HIT=1
+				break
+			fi
+			if [ "$_budget" -gt 0 ]; then
+				_cap=$_share
+				if [ "$_FETCH_STOP" -gt 0 ]; then
+					_rem=$(fetch_remaining)
+					if [ "$_rem" -lt 1 ]; then
+						_FETCH_BUDGET_HIT=1
+						break
+					fi
+					[ "$_cap" -gt 0 ] && [ "$_rem" -lt "$_cap" ] && _cap=$_rem
+				fi
+			else
+				_cap=$_attempt_cap
+			fi
+			[ "$_cap" -ge 1 ] || _cap=1
+			_try_no=$((_try_no + 1))
+			fetch_progress "загрузка: $_t, попытка $_try_no из $_total (предел ${_cap} с)"
+			fetch_once "$_t" "$_cap" "$1" "$2"
+			_fetch_rc=$?
+			if [ "$_fetch_rc" -eq 0 ]; then
+				rm -f "$FETCH_ERRFILE"
+				fetch_progress "загрузка: $_t — успех"
+				return 0
+			fi
+			fetch_tool_kind_set "$_t" "${FETCH_ERR:-network}"
+			fetch_progress "загрузка: $_t не удалась (${FETCH_ERR:-network}); пробую альтернативу"
+		done
+		[ "$_FETCH_BUDGET_HIT" -eq 1 ] && break
+		_round=$((_round + 1))
+	done
+	rm -f "$2" "$FETCH_ERRFILE"
+	case "$FETCH_ERR" in
+	http | tls | empty | nodl) ;;
+	*) [ "$_FETCH_BUDGET_HIT" -eq 1 ] && FETCH_ERR=budget ;;
+	esac
+	return "${_fetch_rc:-1}"
 }
 
 # Человекочитаемая причина отказа загрузки по виду и подтверждённому коду.
@@ -723,8 +845,9 @@ fetch_reason_text() { # KIND [DETAIL]
 	case "$1" in
 	http) printf 'сервер вернул ошибку HTTP%s' "${2:+ $2}" ;;
 	tls) printf 'не пройдена проверка TLS/сертификата' ;;
-	nodl) printf 'нет инструмента скачивания (uclient-fetch, wget или curl)' ;;
+	nodl) printf 'нет инструмента скачивания (curl, wget или uclient-fetch)' ;;
 	empty) printf 'сервер вернул пустой ответ (файл не записан)' ;;
+	budget) printf 'исчерпан общий бюджет загрузки (%s с)' "${FETCH_BUDGET:-60}" ;;
 	*) printf 'нет соединения с сервером (сеть, DNS или тайм-аут)' ;;
 	esac
 }
@@ -1439,6 +1562,20 @@ make_backup() { # make_backup ACTION -> dir
 	printf '%s\n' "$_mb_dir"
 }
 
+# Конфигурации до операции не было, а postinst создал шаблон. Фиксируем его
+# SHA-256 сразу после установки: откат удалит файл, только если он не изменён
+# с этого момента. Секретов в снимке нет — только хеш и права.
+note_created_config() { # note_created_config BACKUP_DIR
+	[ "$CFG_PRESENT_BEFORE" -eq 0 ] || return 0
+	[ -f "$CONFIG" ] || return 0
+	printf 'yes\n' >"$1/config_created" 2>/dev/null || return 1
+	_ncc_sha=$(config_sha) || return 1
+	printf '%s\n' "$_ncc_sha" >"$1/config_created.sha256" 2>/dev/null || return 1
+	_ncc_mode=$(stat -c '%a' "$CONFIG" 2>/dev/null || true)
+	printf '%s\n' "${_ncc_mode:-600}" >"$1/config_created.mode" 2>/dev/null || true
+	return 0
+}
+
 remove_new_files() { # remove_new_files PKG OLD_LIST
 	_rnf_pkg=$1
 	_rnf_old=$2
@@ -1449,6 +1586,26 @@ remove_new_files() { # remove_new_files PKG OLD_LIST
 		case "$_rnf_f" in /*) ;; *) continue ;; esac
 		grep -Fxq "$_rnf_f" "$_rnf_old" && continue
 		rm -f "$_rnf_root$_rnf_f" 2>/dev/null || true
+		prune_own_dirs "$(dirname "$_rnf_root$_rnf_f")"
+	done
+}
+
+# Только собственные пустые каталоги пакета: rmdir не трогает непустые
+# каталоги и чужие данные (оставшееся ядро, панель, другие пакеты).
+prune_own_dirs() { # prune_own_dirs PATH
+	_pod_p=${1%/}
+	_pod_root=${ROOT%/}
+	[ -n "$_pod_p" ] || return 0
+	case "$_pod_p" in
+	"$_pod_root/usr/lib/csqtt" | "$_pod_root/usr/lib/csqtt/"* | \
+	"$_pod_root/usr/libexec/csqtt" | "$_pod_root/usr/libexec/csqtt/"* | \
+	"$_pod_root/www/luci-static/resources/view/csqtt" | "$_pod_root/www/luci-static/resources/view/csqtt/"*)
+		;;
+	*) return 0 ;;
+	esac
+	while [ "$_pod_p" != "$_pod_root" ] && [ "$_pod_p" != "/" ] && [ -n "$_pod_p" ]; do
+		rmdir "$_pod_p" 2>/dev/null || return 0
+		_pod_p=$(dirname "$_pod_p")
 	done
 }
 
@@ -1505,6 +1662,7 @@ restore_pm_versions() { # restore_pm_versions BACKUP_DIR
 
 restore_snapshot() { # restore_snapshot BACKUP_DIR
 	_rss_b=$1
+	RESTORE_INCOMPLETE=""
 	[ -d "$_rss_b" ] || {
 		err "откат: снимок $_rss_b не найден"
 		return 1
@@ -1546,6 +1704,26 @@ restore_snapshot() { # restore_snapshot BACKUP_DIR
 			err "откат: SHA-256 $CONFIG не совпал со снимком"
 			return 1
 		}
+	else
+		# Конфигурации до операции не было. Удаляется только созданный этой
+		# операцией и не изменённый после создания шаблон. Изменённый файл не
+		# наш: он сохраняется, а возврат честно помечается неполным.
+		if [ -f "$CONFIG" ]; then
+			_rss_created=$(cat "$_rss_b/config_created" 2>/dev/null || echo no)
+			_rss_csha=$(cat "$_rss_b/config_created.sha256" 2>/dev/null || true)
+			if [ "$_rss_created" = "yes" ] && [ -n "$_rss_csha" ] &&
+				[ "$(config_sha)" = "$_rss_csha" ]; then
+				if rm -f "$CONFIG" 2>/dev/null; then
+					info "откат: созданный установкой неизменённый $CONFIG удалён"
+				else
+					RESTORE_INCOMPLETE="не удалось удалить созданный установкой $CONFIG"
+					warn "откат: $RESTORE_INCOMPLETE; нужно ручное решение"
+				fi
+			else
+				RESTORE_INCOMPLETE="созданный установкой $CONFIG изменён после создания и сохранён"
+				warn "откат: $RESTORE_INCOMPLETE; нужно ручное решение"
+			fi
+		fi
 	fi
 	if [ -f "$_rss_b/keep_core253" ]; then
 		activate_core253 || {
@@ -1616,6 +1794,12 @@ verify_restored() { # verify_restored BACKUP_DIR
 				return 1
 			}
 		done <"$_vr_b/core/files.list"
+	else
+		_vr_now=$(installed_version_of "$CORE_PACKAGE")
+		[ -z "$_vr_now" ] || {
+			err "после отката ядро $CORE_PACKAGE всё ещё числится установленным ($_vr_now)"
+			return 1
+		}
 	fi
 	if [ "$(cat "$_vr_b/panel_present" 2>/dev/null || echo no)" = "yes" ]; then
 		_vr_ver=$(cat "$_vr_b/panel_version" 2>/dev/null || true)
@@ -1634,15 +1818,376 @@ verify_restored() { # verify_restored BACKUP_DIR
 				return 1
 			}
 		done <"$_vr_b/panel/files.list"
+	else
+		_vr_now=$(installed_version_of "$PANEL_PACKAGE")
+		[ -z "$_vr_now" ] || {
+			err "после отката панель $PANEL_PACKAGE всё ещё числится установленной ($_vr_now)"
+			return 1
+		}
 	fi
 	return 0
 }
 
+# Согласованность базы PM с восстановленными файлами: 0 — согласовано,
+# 1 — расхождение, 2 — проверить невозможно (нет менеджера/запроса).
+# Предупреждение выводится только по 1/2, а не после каждого исправного отката.
+pm_db_consistent() { # pm_db_consistent BACKUP_DIR
+	_pdc_b=$1
+	if [ "$PM" = "apk" ]; then
+		command -v apk >/dev/null 2>&1 || return 2
+		apk list --installed >/dev/null 2>&1 || return 2
+	else
+		command -v opkg >/dev/null 2>&1 || return 2
+		opkg list-installed >/dev/null 2>&1 || return 2
+	fi
+	_pdc_fail=0
+	for _pdc_name in core panel; do
+		case "$_pdc_name" in
+		core) _pdc_pkg=$CORE_PACKAGE ;;
+		panel) _pdc_pkg=$PANEL_PACKAGE ;;
+		esac
+		_pdc_present=$(cat "$_pdc_b/${_pdc_name}_present" 2>/dev/null || echo no)
+		_pdc_ver=$(cat "$_pdc_b/${_pdc_name}_version" 2>/dev/null || true)
+		_pdc_now=$(installed_version_of "$_pdc_pkg")
+		if [ "$_pdc_present" = "yes" ]; then
+			[ "$_pdc_now" = "$_pdc_ver" ] || _pdc_fail=1
+		else
+			[ -z "$_pdc_now" ] || _pdc_fail=1
+		fi
+	done
+	[ "$_pdc_fail" -eq 0 ]
+}
+
 # --- проверка состояния ----------------------------------------------------
+
+# --- фактическое состояние конфигурации и готовность службы -----------------
+#
+# [2026-11-25] Установка без профиля — не отказ: пакет создаёт шаблон с
+# enabled=0, транспорт не запускается, csqtt0 не появляется. Решение
+# принимается по конфигурации и фактическому состоянию процесса, а не только
+# по active_profile: при priority-выборе пригоден любой включённый профиль,
+# при manual — active_profile и его enabled. Ошибка чтения конфигурации —
+# отдельное состояние, она не превращается в «профиля нет, всё хорошо».
+
+# Разбор подмножества UCI, достаточного для решения. Неизвестная строка или
+# недопустимое значение 0/1 — ошибка конфигурации (демон тоже её отвергнет).
+cfg_scan() { # cfg_scan FILE
+	awk '
+	function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+	function unquote(s,    q) {
+		s = trim(s)
+		if (s == "") return s
+		q = substr(s, 1, 1)
+		if (q == SQ || q == "\"") {
+			if (length(s) < 2 || substr(s, length(s), 1) != q) { bad = 1; return s }
+			s = substr(s, 2, length(s) - 2)
+		}
+		return s
+	}
+	function bool_state(v,    w) {
+		if (v == "") return 0
+		w = tolower(v)
+		if (w == "0" || w == "false" || w == "off" || w == "no") return 0
+		if (w == "1" || w == "true" || w == "on" || w == "yes") return 1
+		return 2
+	}
+	BEGIN {
+		SQ = sprintf("%c", 39)
+		cur = ""; curname = ""; nserver = 0; bad = 0
+		men = "0"; mmode = "priority"; mact = ""; mif = ""
+	}
+	{
+		line = $0
+		sub(/\r$/, "", line)
+		if (line ~ /^[ \t]*$/) next
+		if (line ~ /^[ \t]*#/) next
+		if (line ~ /^[ \t]*config[ \t]+/) {
+			s = line
+			sub(/^[ \t]*config[ \t]+/, "", s)
+			ctype = s
+			sub(/[ \t].*$/, "", ctype)
+			cname = ""
+			if (s ~ /[ \t]/) {
+				cname = s
+				sub(/^[^ \t]+[ \t]+/, "", cname)
+				cname = unquote(cname)
+			}
+			cur = ctype
+			curname = cname
+			if (ctype == "csqtt" && cname == "") bad = 1
+			if (ctype == "server") {
+				if (cname == "") bad = 1
+				nserver++
+				sid[nserver] = cname
+				sen[nserver] = "1"
+			}
+			next
+		}
+		if (line ~ /^[ \t]*option[ \t]+/) {
+			s = line
+			sub(/^[ \t]*option[ \t]+/, "", s)
+			if (s !~ /[ \t]/) { bad = 1; next }
+			key = s
+			sub(/[ \t].*$/, "", key)
+			val = s
+			sub(/^[^ \t]+[ \t]+/, "", val)
+			val = unquote(val)
+			if (cur == "csqtt" && curname == "main") {
+				if (key == "enabled") men = val
+				else if (key == "selection_mode") mmode = val
+				else if (key == "active_profile") mact = val
+				else if (key == "ifname") mif = val
+			} else if (cur == "server" && nserver > 0 && key == "enabled") {
+				sen[nserver] = val
+			}
+			next
+		}
+		if (line ~ /^[ \t]*list[ \t]+/) next
+		bad = 1
+	}
+	END {
+		mode = tolower(mmode)
+		if (mode != "" && mode != "priority" && mode != "manual") bad = 1
+		en = bool_state(men)
+		if (en == 2) bad = 1
+		usable = 0
+		if (en == 1) {
+			if (mode == "manual") {
+				for (i = 1; i <= nserver; i++) {
+					sb = bool_state(sen[i])
+					if (sb == 2) bad = 1
+					if (sid[i] == mact && sb == 1) usable = 1
+				}
+			} else {
+				for (i = 1; i <= nserver; i++) {
+					sb = bool_state(sen[i])
+					if (sb == 2) bad = 1
+					if (sb == 1) usable = 1
+				}
+			}
+		}
+		if (bad) { print "parse_error=1"; exit 0 }
+		printf "enabled=%d mode=%s ifname=%s servers=%d usable=%d parse_error=0\n", \
+			en, (mode == "manual" ? "manual" : "priority"), \
+			(mif == "" ? "csqtt0" : mif), nserver, usable
+	}
+	' "$1" 2>/dev/null
+}
+
+# CFG_STATE: absent | disabled | no_profile | ready | error
+# CFG_STATE_TEXT — короткая причина без секретов.
+CFG_STATE=""
+CFG_STATE_TEXT=""
+CFG_ENABLED=0
+CFG_MODE=priority
+CFG_IFNAME=csqtt0
+CFG_USABLE=0
+
+config_state() {
+	CFG_STATE=""
+	CFG_STATE_TEXT=""
+	CFG_ENABLED=0
+	CFG_MODE=priority
+	CFG_IFNAME=csqtt0
+	CFG_USABLE=0
+	if [ ! -e "$CONFIG" ]; then
+		CFG_STATE=absent
+		CFG_STATE_TEXT="конфигурация не создана"
+		return 0
+	fi
+	if [ ! -f "$CONFIG" ] || [ ! -r "$CONFIG" ]; then
+		CFG_STATE=error
+		CFG_STATE_TEXT="файл недоступен для чтения"
+		return 0
+	fi
+	_cs_line=$(cfg_scan "$CONFIG") || {
+		CFG_STATE=error
+		CFG_STATE_TEXT="файл не прочитан"
+		return 0
+	}
+	case "$_cs_line" in
+	*parse_error=1*)
+		CFG_STATE=error
+		CFG_STATE_TEXT="синтаксис UCI не разобран"
+		return 0
+		;;
+	esac
+	CFG_ENABLED=$(printf '%s\n' "$_cs_line" | sed -n 's/.*enabled=\([0-9]*\).*/\1/p')
+	CFG_MODE=$(printf '%s\n' "$_cs_line" | sed -n 's/.*mode=\([a-z]*\).*/\1/p')
+	CFG_IFNAME=$(printf '%s\n' "$_cs_line" | sed -n 's/.*ifname=\([^ ]*\).*/\1/p')
+	CFG_USABLE=$(printf '%s\n' "$_cs_line" | sed -n 's/.*usable=\([0-9]*\).*/\1/p')
+	case "$CFG_IFNAME" in
+	'' | *[!A-Za-z0-9_.-]*)
+		CFG_STATE=error
+		CFG_STATE_TEXT="недопустимое имя интерфейса"
+		return 0
+		;;
+	esac
+	[ ${#CFG_IFNAME} -le 15 ] || {
+		CFG_STATE=error
+		CFG_STATE_TEXT="слишком длинное имя интерфейса"
+		return 0
+	}
+	case "$CFG_ENABLED" in
+	0)
+		CFG_STATE=disabled
+		CFG_STATE_TEXT="подключение выключено (main.enabled=0)"
+		;;
+	1)
+		if [ "$CFG_USABLE" = "1" ]; then
+			CFG_STATE=ready
+			CFG_STATE_TEXT="включённый профиль есть (${CFG_MODE})"
+		else
+			CFG_STATE=no_profile
+			CFG_STATE_TEXT="нет включённого профиля"
+		fi
+		;;
+	*)
+		CFG_STATE=error
+		CFG_STATE_TEXT="не удалось определить main.enabled"
+		;;
+	esac
+	return 0
+}
+
+status_file() {
+	if [ -n "${CSQTT_INSTALLER_STATUS_FILE:-}" ]; then
+		printf '%s' "$CSQTT_INSTALLER_STATUS_FILE"
+	elif [ -n "$ROOT" ]; then
+		printf '%s' "${ROOT%/}/var/run/csqtt/status.json"
+	else
+		printf '%s' /var/run/csqtt/status.json
+	fi
+}
+
+status_daemon_pid() {
+	_sdp_f=$(status_file)
+	[ -r "$_sdp_f" ] || return 1
+	sed -n 's/.*"daemon_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_sdp_f" 2>/dev/null | head -n 1
+}
+
+status_daemon_state() {
+	_sds_f=$(status_file)
+	[ -r "$_sds_f" ] || return 1
+	sed -n 's/.*"daemon_state"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' "$_sds_f" 2>/dev/null | head -n 1
+}
+
+# Базовая линия снимается ДО перезапуска: интерфейс и status.json нового
+# процесса нельзя сравнивать с состоянием, которое уже включает результат
+# этого перезапуска. Иначе TUN, созданный во время restart, выглядел бы
+# «существовавшим ранее» и установка ложно откатывалась.
+_RW_CAPTURED=0
+_RW_MODE=verify
+_RW_PRE_IF=0
+_RW_PRE_PID=""
+_RW_NAME=csqtt0
+
+readiness_capture() {
+	_RW_MODE=restart
+	config_state
+	[ -n "$CFG_IFNAME" ] && _RW_NAME=$CFG_IFNAME
+	_rwc_dir=$(net_sys_dir)
+	_RW_PRE_IF=0
+	[ -e "$_rwc_dir/$_RW_NAME" ] && _RW_PRE_IF=1
+	_RW_PRE_PID=$(status_daemon_pid 2>/dev/null || true)
+	_RW_CAPTURED=1
+}
+
+# Готовность интерфейса должна принадлежать НОВОМУ процессу. Старый csqtt0
+# (persistent_tun=1 переживает Stop/Start) и устаревший status.json убитого
+# процесса доказательством не являются. После перезапуска принять можно только
+# новый daemon_pid или вновь появившийся интерфейс. При обычной проверке
+# установленной системы (режим verify) достаточно живого daemon_pid или
+# существующего интерфейса: перезапуска не было, доказывать новизну нечего.
+# Причина отказа сохраняется в _RW_WHY.
+readiness_proof() {
+	_rp_pid=$(status_daemon_pid 2>/dev/null || true)
+	_rp_state=$(status_daemon_state 2>/dev/null || true)
+	if [ -n "$_rp_pid" ]; then
+		if ! kill -0 "$_rp_pid" 2>/dev/null; then
+			_RW_WHY="status.json указывает на несуществующий процесс $_rp_pid (устаревший статус)"
+			return 1
+		fi
+		if [ "$_RW_MODE" = restart ] && [ -n "$_RW_PRE_PID" ] && [ "$_rp_pid" = "$_RW_PRE_PID" ]; then
+			_RW_WHY="status.json принадлежит прежнему процессу $_rp_pid"
+			return 1
+		fi
+		case "$_rp_state" in
+		disabled | stopped | stopping)
+			_RW_WHY="служба в состоянии ${_rp_state:-unknown} при включённом подключении"
+			return 1
+			;;
+		esac
+		return 0
+	fi
+	if [ -r "$(status_file)" ]; then
+		_RW_WHY="в status.json нет daemon_pid: свежесть процесса не доказана"
+		return 1
+	fi
+	if [ "$_RW_MODE" != restart ] || [ "$_RW_PRE_IF" -eq 0 ]; then
+		return 0
+	fi
+	_RW_WHY="интерфейс $_RW_NAME существовал до перезапуска, а status.json не подтверждает новый процесс"
+	return 1
+}
+
+# Ограниченное ожидание готовности. Никакого безусловного sleep: опрос
+# прекращается сразу при подтверждении. 30 с по умолчанию обоснованы фактами:
+# рабочий профиль занимал ~6 с от старта службы до TUN, status.json пишется
+# раз в 5 с; пяти секунд не хватало даже обновлению. Предел можно уменьшить
+# для проверок через CSQTT_INSTALLER_READY_TIMEOUT.
+readiness_wait() {
+	_rw_to=${CSQTT_INSTALLER_READY_TIMEOUT:-30}
+	case "$_rw_to" in '' | *[!0-9]*) _rw_to=30 ;; esac
+	_rw_dir=$(net_sys_dir)
+	if [ "$_RW_CAPTURED" -eq 1 ]; then
+		_RW_NAME=${_RW_NAME:-$CFG_IFNAME}
+	else
+		# Вызывающий не снимал базу до перезапуска: это обычная проверка.
+		_RW_MODE=verify
+		[ -n "$CFG_IFNAME" ] && _RW_NAME=$CFG_IFNAME
+		_RW_PRE_IF=0
+		[ -e "$_rw_dir/$_RW_NAME" ] && _RW_PRE_IF=1
+		_RW_PRE_PID=$(status_daemon_pid 2>/dev/null || true)
+	fi
+	_RW_WHY=""
+	_rw_start=$(date +%s 2>/dev/null) || _rw_start=0
+	_rw_deadline=$((_rw_start + _rw_to))
+	_rw_svc=0
+	while :; do
+		service_running && _rw_svc=1
+		if [ "$_rw_svc" -eq 1 ] && [ -e "$_rw_dir/$_RW_NAME" ]; then
+			if readiness_proof; then
+				_RW_CAPTURED=0
+				return 0
+			fi
+		fi
+		_rw_now=$(date +%s 2>/dev/null) || _rw_now=0
+		[ "$_rw_now" -lt "$_rw_deadline" ] || break
+		sleep 0.5 2>/dev/null || sleep 1
+	done
+	_RW_CAPTURED=0
+	if [ "$_rw_svc" -ne 1 ]; then
+		err "служба csqtt не запущена (ubus не подтвердил running) за ${_rw_to} с"
+	elif [ ! -e "$_rw_dir/$_RW_NAME" ]; then
+		err "интерфейс $_RW_NAME не создан за ${_rw_to} с ($_rw_dir/$_RW_NAME)"
+	else
+		err "готовность не подтверждена за ${_rw_to} с: ${_RW_WHY:-причина не определена}"
+	fi
+	return 1
+}
+
+# Итог проверки: ready | needs_setup | failed (в STATE_RESULT). needs_setup —
+# успешная установка без профиля/с выключенным подключением: это не отказ и не
+# повод откатывать исправно установленные пакеты. failed — реальный отказ.
+STATE_RESULT="ready"
+STATE_DETAIL=""
 
 state_check() { # state_check SET
 	_sc_set=$1
 	_sc_fail=0
+	STATE_RESULT=ready
+	STATE_DETAIL=""
 	if [ "$_sc_set" = "core" ] || [ "$_sc_set" = "both" ]; then
 		_sc_v=$(installed_version_of "$CORE_PACKAGE")
 		case "$_sc_v" in
@@ -1686,29 +2231,41 @@ state_check() { # state_check SET
 		err "SHA-256 /etc/config/csqtt изменился: профили/секреты/device_id должны сохраняться"
 		_sc_fail=1
 	fi
-	# [AUDIT BUG-09] Файлов недостаточно: на живом корне установка успешна
-	# только при запущенной службе и существующем csqtt0. Установщик не
-	# доказывает прохождение трафика (это вне его возможностей), но и не
-	# выдаёт «OK» при мёртвой службе. Офлайн-корень (CSQTT_ROOT) — явный SKIP.
-	if live_runtime; then
-		if service_running; then
-			if [ "$_sc_set" = "core" ] || [ "$_sc_set" = "both" ]; then
-				_sc_net=$(net_sys_dir)
-				_sc_i=0
-				while [ ! -e "$_sc_net/csqtt0" ] && [ "$_sc_i" -lt 5 ]; do
-					sleep 1
-					_sc_i=$((_sc_i + 1))
-				done
-				[ -e "$_sc_net/csqtt0" ] || {
-					err "интерфейс csqtt0 не создан ($_sc_net/csqtt0)"
-					_sc_fail=1
-				}
-			fi
-		else
-			err "служба csqtt не запущена (ubus не подтвердил running)"
+	# Служба и интерфейс проверяются только для ядра на живом корне. Панель
+	# сама транспорт не поднимает, поэтому для неё runtime-проверка не нужна.
+	if live_runtime && { [ "$_sc_set" = "core" ] || [ "$_sc_set" = "both" ]; }; then
+		config_state
+		case "$CFG_STATE" in
+		error)
+			err "конфигурация /etc/config/csqtt не читается: $CFG_STATE_TEXT; состояние подключения проверить нельзя"
 			_sc_fail=1
-		fi
-	else
+			;;
+		absent)
+			STATE_RESULT=needs_setup
+			STATE_DETAIL="конфигурация не создана"
+			info "конфигурация ещё не создана: установка без профиля, настройка нужна позже (needs_setup)"
+			;;
+		disabled)
+			STATE_RESULT=needs_setup
+			STATE_DETAIL="$CFG_STATE_TEXT"
+			info "подключение выключено в конфигурации: транспорт не запускается (needs_setup)"
+			;;
+		no_profile)
+			STATE_RESULT=needs_setup
+			STATE_DETAIL="$CFG_STATE_TEXT"
+			info "включённого профиля нет: служба запущена без транспорта (needs_setup)"
+			;;
+		ready)
+			if [ "$NO_RESTART" -eq 1 ]; then
+				ok "проверка запуска пропущена: --no-restart"
+			elif readiness_wait; then
+				STATE_RESULT=ready
+			else
+				_sc_fail=1
+			fi
+			;;
+		esac
+	elif ! live_runtime; then
 		info "проверки службы и csqtt0 пропущены: офлайн-корень (SKIP)"
 	fi
 	[ "$_sc_fail" -eq 0 ]
@@ -1773,7 +2330,7 @@ probe_core219() {
 	[ -n "$PKG_EXT" ] || { CORE219_REASON=no_pm; return 0; }
 	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) CORE219_REASON=no_arch; return 0 ;; esac
 	mkdir -p "$WORK" 2>/dev/null || { CORE219_REASON=no_tmpdir; return 0; }
-	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null 2>&1; then
+	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null; then
 		CORE219_FETCH_ERR=$FETCH_ERR
 		CORE219_FETCH_DETAIL=$FETCH_DETAIL
 		CORE219_REASON=fetch
@@ -2158,6 +2715,12 @@ cmd_verify() {
 	CFG_SHA_BEFORE=$(config_sha)
 	step "Проверка без изменений"
 	if state_check "$INSTALL_SET"; then
+		if [ "$STATE_RESULT" = "needs_setup" ]; then
+			info "компоненты установлены, но требуется настройка: ${STATE_DETAIL:-профиль не задан}"
+			emit "VERIFY_OK|$INSTALL_SET"
+			emit "NEEDS_SETUP|$INSTALL_SET|${STATE_DETAIL:-profile}"
+			return 0
+		fi
 		ok "Проверка пройдена: $INSTALL_SET"
 		emit "VERIFY_OK|$INSTALL_SET"
 		return 0
@@ -2351,9 +2914,32 @@ cmd_install() { # cmd_install install|update
 	[ "$keep_core253" -eq 0 ] || : >"$BACKUP/keep_core253"
 
 	# shellcheck disable=SC2086
-	if ! pm_install_selected || { [ "$keep_core253" -eq 1 ] && ! activate_core253; }; then
+	_pm_ok=0
+	if pm_install_selected; then
+		_pm_ok=1
+	fi
+	if [ "$_pm_ok" -eq 1 ] && [ "$keep_core253" -eq 1 ]; then
+		activate_core253 || _pm_ok=0
+	fi
+	# Шаблон, созданный postinst, фиксируется сразу после установки. Откат
+	# вправе удалить только его и только если он не изменился после этого.
+	note_created_config "$BACKUP" ||
+		warn "не удалось зафиксировать созданную конфигурацию; откат не будет её удалять"
+	if [ "$_pm_ok" -eq 0 ]; then
 		err "$PM не установил набор или не удалось восстановить управляющий слой 2.5.3"
 		if restore_snapshot "$BACKUP" && verify_restored "$BACKUP"; then
+			if [ -n "$RESTORE_INCOMPLETE" ]; then
+				warn "пакеты восстановлены, но возврат неполный: $RESTORE_INCOMPLETE"
+				warn "снимок сохранён: $BACKUP; требуется ручное решение"
+				emit "RESTORE_INCOMPLETE|$BACKUP|$RESTORE_INCOMPLETE"
+				exit "$EX_RECOVERED"
+			fi
+			pm_db_consistent "$BACKUP"
+			case "$?" in
+			0) ;;
+			1) warn "обнаружено расхождение базы $PM с восстановленными файлами; проверьте: $PM list-installed" ;;
+			*) warn "не удалось проверить согласованность базы $PM с файлами; проверьте вручную" ;;
+			esac
 			warn "прежнее состояние восстановлено из $BACKUP"
 			emit "ROLLED_BACK|$BACKUP"
 			exit "$EX_RECOVERED"
@@ -2363,6 +2949,7 @@ cmd_install() { # cmd_install install|update
 
 	_ci_service_failed=0
 	if [ "$INSTALL_SET" != panel ]; then
+		readiness_capture
 		restart_service || _ci_service_failed=1
 	fi
 	if [ "$_ci_service_failed" -eq 1 ]; then
@@ -2375,6 +2962,18 @@ cmd_install() { # cmd_install install|update
 
 	step "Проверка после установки"
 	if state_check "$INSTALL_SET"; then
+		if [ "$STATE_RESULT" = "needs_setup" ]; then
+			ok "Установка завершена: $INSTALL_SET (требуется настройка)"
+			ok "Снимок для отката: $BACKUP"
+			if [ "$CFG_PRESENT_BEFORE" -eq 0 ] || [ "$CFG_STATE" != "disabled" ]; then
+				log "Установлено. Добавьте сервер и включите подключение"
+			else
+				log "Установлено. Подключение выключено; включите его после добавления сервера."
+			fi
+			emit "OK|$INSTALL_SET"
+			emit "NEEDS_SETUP|$INSTALL_SET|${STATE_DETAIL:-profile}"
+			return 0
+		fi
 		ok "Установка завершена: $INSTALL_SET"
 		ok "Снимок для отката: $BACKUP"
 		emit "OK|$INSTALL_SET"
@@ -2383,8 +2982,19 @@ cmd_install() { # cmd_install install|update
 
 	err "проверка после установки не пройдена"
 	if restore_snapshot "$BACKUP" && verify_restored "$BACKUP"; then
+		if [ -n "$RESTORE_INCOMPLETE" ]; then
+			warn "пакеты и версии восстановлены, но возврат неполный: $RESTORE_INCOMPLETE"
+			warn "снимок сохранён: $BACKUP; требуется ручное решение"
+			emit "RESTORE_INCOMPLETE|$BACKUP|$RESTORE_INCOMPLETE"
+			exit "$EX_RECOVERED"
+		fi
+		pm_db_consistent "$BACKUP"
+		case "$?" in
+		0) ;;
+		1) warn "обнаружено расхождение базы $PM с восстановленными файлами; проверьте: $PM list-installed" ;;
+		*) warn "не удалось проверить согласованность базы $PM с файлами; проверьте вручную" ;;
+		esac
 		warn "прежнее состояние восстановлено: $BACKUP"
-		warn "версия в базе $PM может отличаться от восстановленных файлов; при необходимости: $PM remove $CORE_PACKAGE $PANEL_PACKAGE"
 		emit "ROLLED_BACK|$BACKUP"
 		exit "$EX_RECOVERED"
 	fi
@@ -2409,6 +3019,18 @@ cmd_rollback() {
 	take_lock
 	stop_service
 	if restore_snapshot "$_rb_dir" && verify_restored "$_rb_dir"; then
+		if [ -n "$RESTORE_INCOMPLETE" ]; then
+			warn "откат неполный: $RESTORE_INCOMPLETE"
+			warn "снимок сохранён: $_rb_dir; требуется ручное решение"
+			emit "RESTORE_INCOMPLETE|$_rb_dir|$RESTORE_INCOMPLETE"
+			return "$EX_RECOVERED"
+		fi
+		pm_db_consistent "$_rb_dir"
+		case "$?" in
+		0) ;;
+		1) warn "обнаружено расхождение базы $PM с восстановленными файлами; проверьте: $PM list-installed" ;;
+		*) warn "не удалось проверить согласованность базы $PM с файлами; проверьте вручную" ;;
+		esac
 		ok "Откат выполнен: $_rb_dir"
 		emit "ROLLED_BACK|$_rb_dir"
 		return 0
