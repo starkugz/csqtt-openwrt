@@ -364,6 +364,9 @@ $TOOL_NAME $TOOL_VERSION — установка сервера CSQTT с нуля
 и пароль сохраняются в env-файле 0600 и показываются только в терминале.
 В журнал установщика и аргументы процесса они не передаются.
 Резервные копии создаются с правами 0700, файлы — 0600.
+Смена версии сервера (2.1.9 ↔ 2.5.3) поверх установленной не поддерживается:
+сначала удалите установленную версию CSQTT (uninstall сохраняет данные),
+затем установите нужную. Автоматической миграции базы нет.
 EOF
 }
 
@@ -554,6 +557,13 @@ legacy_server_selected() {
     [ "$(sha256_of "$file")" = 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3 ]
 }
 
+# Установленный сервер — опубликованный 2.1.9. Семейство определяется по
+# точному SHA полезной нагрузки; локально пересобранный 2.1.9 вне области.
+installed_is_legacy() {
+    [ -f "$TARGET_BIN" ] || return 1
+    [ "$(sha256_of "$TARGET_BIN")" = 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3 ]
+}
+
 # Ближайший существующий каталог (для df по ещё не созданным путям). Только
 # чтение; ничего не создаёт.
 existing_ancestor_dir() {
@@ -606,7 +616,7 @@ check_free_space() {
 }
 
 preflight_check() {
-	local fail=0 hm cm magic sha actual
+	local fail=0 hm cm magic sha actual installed_legacy cand_legacy
 	FOREIGN_BLOCK=0
 
 	if [ "$(uname -s)" != "Linux" ]; then
@@ -691,6 +701,20 @@ preflight_check() {
     if legacy_server_selected; then
         if [ "$INSTANCE" != csqtt ] || [ "$IFACE" != csqtt1 ] || { [ -n "$TUN_ADDR" ] && [ "$TUN_ADDR" != 10.66.67.1/24 ]; } || [ "$SUBNET" != 10.66.67.0/24 ] || [ "$NO_NAT" -ne 0 ] || [ "$NO_WEB" -ne 0 ] || [ -n "$DESIRED" ]; then
             err "Оригинальный сервер 2.1.9 не поддерживает --instance/--iface/--tun-addr/--no-nat/--no-web/--desired. Нужны стандартный экземпляр csqtt, csqtt1 и 10.66.67.1/24; версия автоматически не заменяется"
+            fail=1
+        fi
+    fi
+
+    # Смена версии поверх установленной отклоняется до резерва, записи файлов и
+    # остановки службы: серверы 2.1.9 и 2.5.3 устанавливаются отдельно, база
+    # автоматически не мигрирует. Повторная установка той же версии разрешена.
+    if [ -f "$TARGET_BIN" ] && [ -f "$CANDIDATE" ]; then
+        installed_legacy=0
+        cand_legacy=0
+        installed_is_legacy && installed_legacy=1
+        legacy_server_selected && cand_legacy=1
+        if [ "$installed_legacy" -ne "$cand_legacy" ]; then
+            err "Смена версии CSQTT поверх установленной не поддерживается. Сначала удалите установленную версию CSQTT, затем установите нужную. Файлы и служба не изменялись."
             fail=1
         fi
     fi
@@ -1406,9 +1430,47 @@ make_backup() {
 
 _manifest_present() { [ -e "$1" ] && printf 'yes\n' || printf 'no\n'; }
 
-# Восстановление состояния из резервной копии. Успех — код возврата 0.
+# Подготовка восстановления конфигурации: резерв распаковывается во временный
+# каталог, поэтому повреждённый архив не затрагивает текущую конфигурацию.
+# Печатает путь к распакованному каталогу; ошибка — код 1.
+restore_config_prepare() {
+	local bdir="$1" tmp base
+	base=$(basename "$CONFIG_DIR")
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/csqtt-restore.XXXXXX" 2>/dev/null) || return 1
+	if ! tar -C "$tmp" -xzf "$bdir/config.tar.gz" 2>/dev/null; then
+		rm -rf -- "$tmp"
+		return 1
+	fi
+	if [ ! -d "$tmp/$base" ]; then
+		rm -rf -- "$tmp"
+		return 1
+	fi
+	printf '%s\n' "$tmp/$base"
+}
+
+# Атомарная замена каталога конфигурации подготовленной копией. Возвращает
+# каталог целиком, поэтому удалённые после резерва файлы тоже восстанавливаются,
+# а появившийся после резерва мусор уходит. При сбое старый каталог остаётся.
+replace_config_dir() {
+	local src="$1" old
+	old="$(dirname "$CONFIG_DIR")/.$(basename "$CONFIG_DIR").rollback.$$"
+	rm -rf -- "$old"
+	if [ -e "$CONFIG_DIR" ] && ! mv -- "$CONFIG_DIR" "$old"; then
+		return 1
+	fi
+	if mv -- "$src" "$CONFIG_DIR"; then
+		rm -rf -- "$old"
+		return 0
+	fi
+	[ -e "$old" ] && mv -- "$old" "$CONFIG_DIR"
+	return 1
+}
+
+# Восстановление состояния из резервной копии.
+# 0 — успех; 2 — файлы восстановлены, но служба не запущена (неполный откат);
+# 3 — конфигурация не восстановлена, служба не перезапускалась.
 rollback_to_backup() {
-	local bdir="$1" restore_config="$2" had
+	local bdir="$1" restore_config="$2" had prepared
 
 	had=$(cat "$bdir/binary_present" 2>/dev/null || echo no)
 
@@ -1489,13 +1551,38 @@ rollback_to_backup() {
 		rm -f -- "$SYSCTL_UDP_FILE"
 	fi
 
-	if [ "$restore_config" = "yes" ] && [ -f "$bdir/config.tar.gz" ]; then
-		tar -C "$(dirname "$CONFIG_DIR")" -xzf "$bdir/config.tar.gz" || return 1
+	# Конфигурация восстанавливается только по явному флагу и только если она
+	# была в резерве. Сначала распаковка во временный каталог: при повреждённом
+	# архиве текущая конфигурация и работающая служба не затрагиваются.
+	prepared=""
+	if [ "$restore_config" -eq 1 ]; then
+		if [ ! -f "$bdir/config.tar.gz" ]; then
+			err "в резерве $bdir нет config.tar.gz (копия создана с --no-backup-config); конфигурация не восстановлена"
+			return 3
+		fi
+		if ! prepared=$(restore_config_prepare "$bdir"); then
+			err "не удалось прочитать резерв конфигурации $bdir/config.tar.gz; текущая конфигурация и служба не изменялись"
+			return 3
+		fi
+		"$SYSTEMCTL_BIN" stop "$SERVICE" >/dev/null 2>&1 || true
+		if ! replace_config_dir "$prepared"; then
+			rm -rf -- "$(dirname "$prepared")"
+			err "служба остановлена, но заменить $CONFIG_DIR восстановленной копией не удалось; файлы службы уже восстановлены"
+			return 3
+		fi
+		rm -rf -- "$(dirname "$prepared")"
 	fi
 
 	"$SYSTEMCTL_BIN" daemon-reload >/dev/null 2>&1 || true
-	"$SYSTEMCTL_BIN" restart "$SERVICE" >/dev/null 2>&1 || return 1
-	wait_health
+	if ! "$SYSTEMCTL_BIN" restart "$SERVICE" >/dev/null 2>&1; then
+		err "файлы восстановлены, но службу $SERVICE запустить не удалось"
+		return 2
+	fi
+	if ! wait_health; then
+		err "файлы восстановлены, но служба $SERVICE не прошла health-check"
+		return 2
+	fi
+	return 0
 }
 
 # --- health-check ---------------------------------------------------------
@@ -1612,18 +1699,32 @@ cmd_preflight() {
 }
 
 auto_rollback() {
-	local bdir="$1" reason="${2:-health-check не пройден}"
+	local bdir="$1" reason="${2:-health-check не пройден}" rc=0
 	warn "$reason — автоматический откат к предыдущему состоянию"
-	if rollback_to_backup "$bdir" no; then
+	rollback_to_backup "$bdir" 0 || rc=$?
+	case "$rc" in
+	0)
 		if [ "$NEW_WEB_CREDENTIALS" -eq 1 ]; then rm -f -- "$ENV_FILE"; fi
 		ok "Предыдущее состояние восстановлено: $bdir"
 		emit "CSQTT_SERVER_INSTALL_ROLLED_BACK|$bdir"
 		exit "$EX_ACTIVATION"
-	fi
-	err "Автоматический откат не удался. Точная команда ручного отката:"
-	err "  $TOOL_NAME rollback --backup $bdir"
-	emit "CSQTT_SERVER_INSTALL_ROLLBACK_FAILED|$bdir"
-	exit "$EX_ROLLBACK_FAILED"
+		;;
+	2)
+		err "Неполный откат: файлы возвращены из $bdir, но служба $SERVICE не запущена."
+		err "Причина запуска видна в: $SYSTEMCTL_BIN status $SERVICE; после устранения повторите:"
+		err "  $TOOL_NAME rollback --backup $bdir"
+		emit "CSQTT_SERVER_INSTALL_ROLLBACK_PARTIAL|$bdir"
+		exit "$EX_ROLLBACK_FAILED"
+		;;
+	*)
+		if [ "$NEW_WEB_CREDENTIALS" -eq 1 ]; then rm -f -- "$ENV_FILE"; fi
+		err "Автоматический откат не удался: прежнее состояние не восстановлено, служба не перезапускалась."
+		err "Точная команда ручного отката:"
+		err "  $TOOL_NAME rollback --backup $bdir"
+		emit "CSQTT_SERVER_INSTALL_ROLLBACK_FAILED|$bdir"
+		exit "$EX_ROLLBACK_FAILED"
+		;;
+	esac
 }
 
 layout_matches() {
@@ -1786,7 +1887,7 @@ cmd_verify() {
 }
 
 cmd_rollback() {
-	local bdir="$1" safety now
+	local bdir="$1" safety now rc=0
 	[ -n "$bdir" ] || die "не указан каталог резервной копии (--backup DIR)" "$EX_USAGE"
 	[ -d "$bdir" ] || die "каталог резервной копии не найден: $bdir" "$EX_USAGE"
 
@@ -1803,18 +1904,22 @@ cmd_rollback() {
 	take_lock
 	safety=$(make_backup "pre-rollback")
 	step "Текущее состояние сохранено: $safety"
-	if rollback_to_backup "$bdir" "$RESTORE_CONFIG"; then
+	rollback_to_backup "$bdir" "$RESTORE_CONFIG" || rc=$?
+	if [ "$rc" -eq 0 ]; then
 		now=$(sha256_of "$TARGET_BIN" 2>/dev/null || echo removed)
 		record_current "$safety" "$now"
 		ok "Откат выполнен"
 		emit "CSQTT_SERVER_INSTALL_ROLLED_BACK|$bdir"
 		return 0
 	fi
-	die "откат не удался; текущее состояние сохранено в $safety" "$EX_ROLLBACK_FAILED"
+	if [ "$rc" -eq 2 ]; then
+		die "неполный откат: файлы восстановлены из $bdir, но служба $SERVICE не запущена; текущее состояние сохранено в $safety" "$EX_ROLLBACK_FAILED"
+	fi
+	die "откат прерван: конфигурация не восстановлена из $bdir, служба не перезапускалась; текущее состояние сохранено в $safety" "$EX_ROLLBACK_FAILED"
 }
 
 cmd_uninstall() {
-	local keep="$CONFIG_DIR"
+	local keep="$CONFIG_DIR" family db kept=""
 	guard_ownership || die "удаление остановлено: чужой процесс/непонятное владение" "$EX_FOREIGN"
 	if [ "$DRY_RUN" -eq 1 ]; then
 		ok "dry-run: будут удалены $UNIT_PATH, хелперы $LIB_DIR, бинарник $TARGET_BIN"
@@ -1822,11 +1927,30 @@ cmd_uninstall() {
 		emit "CSQTT_SERVER_INSTALL_DRY_RUN|uninstall"
 		return 0
 	fi
+	# Версию снимаем до удаления бинарника, чтобы объяснить судьбу данных.
+	if installed_is_legacy; then
+		family="2.1.9"
+	elif [ -f "$TARGET_BIN" ]; then
+		family="2.5.3 (или другая сборка)"
+	else
+		family="неизвестна"
+	fi
 	confirm "Остановить службу $SERVICE и удалить unit/хелперы/бинарник (конфигурация сохранится)?"
 	take_lock
 	remove_service_files
 	ok "Служба $SERVICE остановлена, unit/хелперы/бинарник удалены"
 	ok "Конфигурация сохранена: $keep"
+	for db in "$keep/csqtt.db" "$keep"/*.db; do
+		[ -f "$db" ] || continue
+		kept="$db"
+		break
+	done
+	if [ -n "$kept" ]; then
+		warn "В $keep осталась база: $kept (снятая версия: $family)."
+		warn "Совместимость этих данных с другой версией сервера не подтверждена; автоматическая миграция не выполняется."
+		warn "Для чистой установки отдельно решите, что делать с этими данными: сохранить для текущей версии или убрать вручную."
+		emit "CSQTT_SERVER_UNINSTALL_DATA_KEPT|$kept"
+	fi
 	emit "CSQTT_SERVER_INSTALL_UNINSTALLED|$SERVICE"
 }
 
