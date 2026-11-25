@@ -6,6 +6,7 @@ install_csqtt() (
     base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/3be75dd05d6e258e6e98ee46cdebb3f015b4df4e
     if [ -f /etc/openwrt_release ]; then
         installer=router/install.sh
+        url=$base/$installer
         sha=c41e6fb7ecf667e8ffb8cb06356d5904e7b852d2d4ca049a6560495db2e61cb3
         platform=OpenWrt
         case "${1:---menu}" in
@@ -26,7 +27,8 @@ install_csqtt() (
         esac
     else
         installer=server/install.sh
-        sha=df29d3f7a3ec68e0df7909048ebf8aa4ad0f99d694f8dfc74f8c74e149e273f9
+        url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/d1c1fd2861b07c510fdb98dcb434fb03090cbfa4/server/install.sh
+        sha=b7fd760fd2ba01479aa8746c4e62321e23314dc8238346463e4cd44b1cfe049f
         platform=VPS
         [ "$#" -gt 0 ] || set -- --menu
     fi
@@ -37,10 +39,10 @@ install_csqtt() (
     printf 'CSQTT — загрузка установщика %s…
 ' "$platform"
     if command -v wget >/dev/null 2>&1 &&
-       wget -T 30 -qO "$work/installer.sh" "$base/$installer"; then
+       wget -T 30 -qO "$work/installer.sh" "$url"; then
         :
     elif command -v curl >/dev/null 2>&1; then
-        curl -fLsS --connect-timeout 15 --max-time 60 -o "$work/installer.sh" "$base/$installer"
+        curl -fLsS --connect-timeout 15 --max-time 60 -o "$work/installer.sh" "$url"
     else
         printf 'Не удалось скачать установщик. Проверьте доступ к GitHub.
 ' >&2
