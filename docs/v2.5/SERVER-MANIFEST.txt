@@ -9,5 +9,5 @@ date: 2026-11-09T15:37:25+03:00
 
 legacy-version: 2.1.9
 legacy-asset: csqtt-server-linux-amd64-2.1.9
-legacy-source: https://github.com/starkugz/csqtt-openwrt/releases/download/v2.0/csqtt-server-linux-amd64-2.1.9
+legacy-source: https://raw.githubusercontent.com/starkugz/csqtt-openwrt/b7afa632a97e0d79aa7ee581ee4e698c87fd945f/server/v2.5.3/csqtt-server-linux-amd64-2.1.9
 legacy-sha256: 9740816075518c9d1d09524db0a9abb48a73b554a8dba6963f40b800ce65f9d3

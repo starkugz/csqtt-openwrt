@@ -4,7 +4,7 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 содержит клиентские ядра **2.5.3** и **2.1.9**, необязательную панель LuCI
 **CSQTT 2.5** и установщик сервера Linux.
 
-## Что нового по сравнению с v2.0
+## Возможности текущего комплекта
 
 - **Клиентское ядро 2.5.3.** Основной комплект OpenWrt переходит на
   транспорт 2.5.3. Встроенный Gooby можно включить для TURN по TCP/TLS.
@@ -228,12 +228,6 @@ wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/in
 
 ```sh
 wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.5
-```
-
-Панель 2.0:
-
-```sh
-wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.0
 ```
 
 Добавьте `--dry-run` после номера версии для просмотра плана.

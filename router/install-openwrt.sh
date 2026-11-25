@@ -9,14 +9,13 @@ set -eu
 umask 077
 
 url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh
-sha=63c9103f125e972529ca229261c13578216970f5f6171e90535b3fa3004e06df
+sha=73db7fe7f80293a201bb3866b758b7c377aa6e0d7758771079999c27bbd11851
 
 usage() {
     cat <<'EOF'
 Использование: sh install-openwrt.sh [ОПЦИЯ] [--yes|-y] [--dry-run]
   (без опции), --menu   меню ядра 2.5.3 / панели CSQTT 2.5
   2.5                   установка только панели CSQTT 2.5 (ядро — через --menu)
-  2.0                   установка панели CSQTT 2.0
   -h, --help            эта справка
 Остальные параметры передаются install.sh без изменений.
 EOF
@@ -26,7 +25,7 @@ choice=${1:---menu}
 [ "$#" -eq 0 ] || shift
 case "$choice" in
     -h|--help) usage; exit 0 ;;
-    --menu|2.5|2.0) ;;
+    --menu|2.5) ;;
     *)
         printf 'Неизвестный параметр: %s\n' "$choice" >&2
         usage >&2
@@ -36,7 +35,6 @@ esac
 case "$choice" in
     --menu) set -- install --menu "$@" ;;
     2.5) set -- install --set panel "$@" ;;
-    2.0) set -- 2.0 "$@" ;;
 esac
 
 work=$(mktemp -d) || exit 1
