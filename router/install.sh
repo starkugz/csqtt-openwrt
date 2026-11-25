@@ -139,7 +139,7 @@ cleanup() {
 
 install_router() {
     base=${CSQTT_RELEASE_BASE_URL:-https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3}
-    sha=b49fd3a74eff4dffade3559d53b3a7a43865fcd148668b0cfbcbf08cc43b1a58
+    sha=8a3a9159fdafe4e0788e92c88ac99136b106268c610959994762a8241bfebfb0
     assume_yes=0
     for arg in "$@"; do
         case "$arg" in
@@ -151,7 +151,7 @@ install_router() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/a168fee520f5f9d5e61347f4c946ef2552748929/router/install-csqtt.sh"
+    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/728796230190b58b705fd18c1d9fef8a993ef1d4/router/install-csqtt.sh"
     printf '%s  %s\n' "$sha" "$work/install-csqtt.sh" | sha256sum -c -
 
     if [ "$#" -eq 0 ]; then
