@@ -8,7 +8,7 @@
 set -eu
 umask 077
 
-url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh
+url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/51372758b054ec8c3a2f4e25c71958448b4d9152/install.sh
 sha=a047cd3a5e883aaf6369229ee8da3a9eae7e04d4125dd18a82d00fe03399b2e5
 
 usage() {
@@ -50,7 +50,7 @@ elif command -v curl >/dev/null 2>&1 &&
      curl -fLsS --connect-timeout 15 --max-time 60 -o "$installer" "$url" && [ -s "$installer" ]; then
     :
 elif command -v uclient-fetch >/dev/null 2>&1 &&
-     uclient-fetch -q -O "$installer" "$url"; then
+     uclient-fetch -q -O "$installer" "$url" && [ -s "$installer" ]; then
     :
 else
     rm -f "$installer"

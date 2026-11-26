@@ -7,7 +7,19 @@
 Если старая панель не может обновиться своей кнопкой, запустите установщик по SSH и выберите **Только панель**:
 
 ```sh
-wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
+(
+  f=$(mktemp) || exit 1
+  trap 'rm -f "$f"' EXIT
+  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
+  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
+     { : >"$f"; wget -T 30 -O "$f" "$url" && [ -s "$f" ]; } ||
+     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
+    ash "$f"
+  else
+    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
+    exit 1
+  fi
+)
 ```
 
 Меню показывает установленные компоненты. Актуальные пропускаются, для старых версий предлагается обновление. Конфигурация и профили сохраняются.
