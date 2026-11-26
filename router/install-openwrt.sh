@@ -9,7 +9,7 @@ set -eu
 umask 077
 
 url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh
-sha=1623bac4b1970c9dffc0116e4f35407a9301611923be2d81f205dce96b19be72
+sha=4017bd698122afdbc5b5d306d940a5bf4ef911e3562b56cde04fdb7c789db4c2
 
 usage() {
     cat <<'EOF'
@@ -44,10 +44,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 printf 'CSQTT — загрузка install.sh…\n' >&2
-if command -v wget >/dev/null 2>&1 && wget -T 30 -qO "$installer" "$url"; then
+if command -v wget >/dev/null 2>&1 && wget -T 30 -qO "$installer" "$url" && [ -s "$installer" ]; then
     :
 elif command -v curl >/dev/null 2>&1 &&
-     curl -fLsS --connect-timeout 15 --max-time 60 -o "$installer" "$url"; then
+     curl -fLsS --connect-timeout 15 --max-time 60 -o "$installer" "$url" && [ -s "$installer" ]; then
     :
 elif command -v uclient-fetch >/dev/null 2>&1 &&
      uclient-fetch -q -O "$installer" "$url"; then

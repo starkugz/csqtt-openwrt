@@ -27,6 +27,14 @@
 wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
+Если `wget` завершился без вывода, скачайте скрипт через `curl` и запустите его отдельной командой:
+
+```sh
+f=$(mktemp) &&
+curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh &&
+[ -s "$f" ] && ash "$f"
+```
+
 [Инструкция 2.5](docs/v2.5/README.md).
 
 ## Сервер Linux / VPS

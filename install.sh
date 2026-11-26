@@ -3,11 +3,11 @@
 install_csqtt() (
     set -eu
     umask 077
-    base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/3be75dd05d6e258e6e98ee46cdebb3f015b4df4e
+    base=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/dc1289647d0376cda65adf255ff74bd12d665e9f
     if [ -f /etc/openwrt_release ]; then
         installer=router/install.sh
         url=$base/$installer
-        sha=c41e6fb7ecf667e8ffb8cb06356d5904e7b852d2d4ca049a6560495db2e61cb3
+        sha=80114a5bd7c231d9eb16089aa6bd4d62336365373aacc6a4f9aed10db963bd33
         platform=OpenWrt
         case "${1:---menu}" in
             --menu) [ "$#" -eq 0 ] || shift; set -- install --menu "$@" ;;
@@ -39,7 +39,8 @@ install_csqtt() (
     printf 'CSQTT — загрузка установщика %s…
 ' "$platform"
     if command -v wget >/dev/null 2>&1 &&
-       wget -T 30 -qO "$work/installer.sh" "$url"; then
+       wget -T 30 -qO "$work/installer.sh" "$url" &&
+       [ -s "$work/installer.sh" ]; then
         :
     elif command -v curl >/dev/null 2>&1; then
         curl -fLsS --connect-timeout 15 --max-time 60 -o "$work/installer.sh" "$url"
@@ -48,6 +49,7 @@ install_csqtt() (
 ' >&2
         exit 1
     fi
+    [ -s "$work/installer.sh" ] || { printf '%s\n' 'Установщик не скачан или пуст.' >&2; exit 1; }
     printf '%s  %s
 ' "$sha" "$work/installer.sh" | sha256sum -c -
     if [ -t 0 ]; then
