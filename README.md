@@ -24,9 +24,7 @@
 **Текущий комплект: панель CSQTT 2.5 и ядра 2.1.9 / 2.5.3.**
 
 ```sh
-f=$(mktemp) &&
-wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
-[ -s "$f" ] && ash "$f"
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
 [Инструкция 2.5](docs/v2.5/README.md) · [Диагностика установки и импорта](docs/v2.5/troubleshooting.md#установка-и-импорт-профиля).

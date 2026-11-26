@@ -30,9 +30,7 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 Выполните на роутере по SSH от root. Выберите ядро с панелью, только ядро или только панель.
 
 ```sh
-f=$(mktemp) &&
-wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
-[ -s "$f" ] && ash "$f"
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
 Для выбора версии панели без ядра см. [команды для панели](#только-панель-luci). Установщик определяет
@@ -168,9 +166,7 @@ csqtt log tail -n 50
 Откройте «Удаление компонентов» в основном меню либо запустите:
 
 ```sh
-f=$(mktemp) &&
-wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
-[ -s "$f" ] && ash "$f" uninstall --menu
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- uninstall --menu
 ```
 
 Доступны отдельные действия:
@@ -199,9 +195,7 @@ wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs
 Для удаления только панели выполните команду по SSH:
 
 ```sh
-f=$(mktemp) &&
-wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
-[ -s "$f" ] && ash "$f" uninstall --set panel
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- uninstall --set panel
 ```
 Служба CSQTT продолжит работу.
 Если после удаления LuCI ещё показывает пункт CSQTT, выполните
@@ -235,9 +229,7 @@ wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs
 Панель 2.5:
 
 ```sh
-f=$(mktemp) &&
-wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
-[ -s "$f" ] && ash "$f" 2.5
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash -s -- 2.5
 ```
 
 Добавьте `--dry-run` после номера версии для просмотра плана.

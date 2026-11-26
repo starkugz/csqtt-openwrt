@@ -7,9 +7,7 @@
 Если старая панель не может обновиться своей кнопкой, запустите установщик по SSH и выберите **Только панель**:
 
 ```sh
-f=$(mktemp) &&
-wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
-[ -s "$f" ] && ash "$f"
+wget -T 30 -qO- https://raw.githubusercontent.com/starkugz/csqtt-openwrt/main/install.sh | ash
 ```
 
 Меню показывает установленные компоненты. Актуальные пропускаются, для старых версий предлагается обновление. Конфигурация и профили сохраняются.
