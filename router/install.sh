@@ -139,7 +139,7 @@ cleanup() {
 
 install_router() {
     base=${CSQTT_RELEASE_BASE_URL:-https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3}
-    sha=381a58e47eea9574b6030f28aaa78d187ccce57186d59a35de78d9bcbf760b76
+    sha=5800eb9b840facd22d7cf43784de493878bfd73ed912c538ee60971947c58ac0
     assume_yes=0
     for arg in "$@"; do
         case "$arg" in
