@@ -8,8 +8,8 @@
 set -eu
 umask 077
 
-url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/0472c5add64227d5da41e947abaef6f6f565f3aa/install.sh
-sha=2450560b099f18e431275d6e87350e4b3715e98be55da1288dc63a3aebb77bb2
+url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/507322222d200086c547007c3b2cb7822b412b4a/install.sh
+sha=99b1dc5f9d6bc35c4607e53b250daeecc8d4c62c676c5d2fa588022cc75717c6
 
 usage() {
     cat <<'EOF'
