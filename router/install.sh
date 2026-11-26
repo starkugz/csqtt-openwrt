@@ -139,7 +139,7 @@ cleanup() {
 
 install_router() {
     base=${CSQTT_RELEASE_BASE_URL:-https://github.com/starkugz/csqtt-openwrt/releases/download/v2.5.3}
-    sha=8a3a9159fdafe4e0788e92c88ac99136b106268c610959994762a8241bfebfb0
+    sha=381a58e47eea9574b6030f28aaa78d187ccce57186d59a35de78d9bcbf760b76
     assume_yes=0
     for arg in "$@"; do
         case "$arg" in
@@ -151,7 +151,13 @@ install_router() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    wget -T 30 -O "$work/install-csqtt.sh" "https://raw.githubusercontent.com/starkugz/csqtt-openwrt/728796230190b58b705fd18c1d9fef8a993ef1d4/router/install-csqtt.sh"
+    installer_url="https://raw.githubusercontent.com/starkugz/csqtt-openwrt/cdb49dfc24fffb12eda63022dcb330d670cfc1bb/router/install-csqtt.sh"
+    if ! wget -T 30 -O "$work/install-csqtt.sh" "$installer_url" ||
+       [ ! -s "$work/install-csqtt.sh" ]; then
+        rm -f "$work/install-csqtt.sh"
+        curl -fLsS --connect-timeout 15 --max-time 60 -o "$work/install-csqtt.sh" "$installer_url"
+    fi
+    [ -s "$work/install-csqtt.sh" ] || { printf '%s\n' 'Установщик OpenWrt не скачан или пуст.' >&2; exit 1; }
     printf '%s  %s\n' "$sha" "$work/install-csqtt.sh" | sha256sum -c -
 
     if [ "$#" -eq 0 ]; then
