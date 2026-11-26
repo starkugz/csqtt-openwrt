@@ -634,7 +634,7 @@ fetch_hard_cap() { # fetch_hard_cap SECONDS CMD...
 	case "$_fhc" in '' | *[!0-9]*) _fhc=45 ;; esac
 	[ "$_fhc" -ge 1 ] || _fhc=1
 	if command -v timeout >/dev/null 2>&1 &&
-		timeout -k 1 1 true >/dev/null 2>&1; then
+		[ "$(timeout -k 1 1 printf '%s' csqtt-timeout-ok 2>/dev/null)" = csqtt-timeout-ok ]; then
 		timeout -k 2 "$_fhc" "$@"
 	else
 		"$@"
