@@ -694,7 +694,9 @@ fetch_tool_kind_set() { # fetch_tool_kind_set TOOL KIND
 
 # Одна попытка конкретным инструментом с пределом CAP. Успех — только
 # непустой файл: rc=0 без тела не считается загрузкой.
-fetch_once() { # fetch_once TOOL CAP URL OUT
+fetch_once() { # fetch_once TOOL CAP URL OUT [HEADER]
+	_fon_tool=$1
+	_fon_url=$3
 	_fon_out=$4
 	rm -f "$_fon_out" 2>/dev/null || true
 	: >"$_fon_out" 2>/dev/null || true
@@ -702,16 +704,22 @@ fetch_once() { # fetch_once TOOL CAP URL OUT
 	_fon_ct=15
 	[ "$_fon_ct" -gt "$_fon_cap" ] && _fon_ct=$_fon_cap
 	[ "$_fon_ct" -ge 1 ] || _fon_ct=1
-	case "$1" in
+	shift 4
+	if [ -n "${1:-}" ]; then
+		set -- "--header=$1"
+	else
+		set --
+	fi
+	case "$_fon_tool" in
 	curl)
 		fetch_try curl "$_fon_cap" curl -fsSL \
-			--connect-timeout "$_fon_ct" --max-time "$_fon_cap" "$3" -o "$_fon_out"
+			--connect-timeout "$_fon_ct" --max-time "$_fon_cap" "$@" "$_fon_url" -o "$_fon_out"
 		;;
 	wget)
-		fetch_try wget "$_fon_cap" wget -T "$_fon_cap" -O "$_fon_out" "$3"
+		fetch_try wget "$_fon_cap" wget -T "$_fon_cap" "$@" -O "$_fon_out" "$_fon_url"
 		;;
 	uclient-fetch)
-		fetch_try uclient-fetch "$_fon_cap" uclient-fetch -T "$_fon_cap" -O "$_fon_out" "$3"
+		fetch_try uclient-fetch "$_fon_cap" uclient-fetch -T "$_fon_cap" "$@" -O "$_fon_out" "$_fon_url"
 		;;
 	*)
 		return 127
@@ -733,7 +741,7 @@ fetch_once() { # fetch_once TOOL CAP URL OUT
 # исчерпал свой тайм-аут), затем wget, затем uclient-fetch. Сначала по одной
 # попытке каждым РАЗНЫМ бинарником, и только потом повторы сетевых сбоев:
 # общий бюджет не отдаётся первому инструменту целиком.
-fetch() { # fetch URL OUT
+fetch() { # fetch URL OUT [HEADER]
 	FETCH_ERR=""
 	FETCH_DETAIL=""
 	FETCH_BUDGET=0
@@ -819,7 +827,7 @@ fetch() { # fetch URL OUT
 			[ "$_cap" -ge 1 ] || _cap=1
 			_try_no=$((_try_no + 1))
 			fetch_progress "загрузка: $_t, попытка $_try_no из $_total (предел ${_cap} с)"
-			fetch_once "$_t" "$_cap" "$1" "$2"
+			fetch_once "$_t" "$_cap" "$1" "$2" "${3:-}"
 			_fetch_rc=$?
 			if [ "$_fetch_rc" -eq 0 ]; then
 				rm -f "$FETCH_ERRFILE"
@@ -864,9 +872,43 @@ asset_download_url() {
 	esac
 }
 
+fetch_release_asset() { # fetch_release_asset NAME OUT
+	if fetch "$(asset_download_url "$1")" "$2"; then
+		return 0
+	fi
+	case "$FETCH_ERR" in network | budget | empty) ;; *) return 1 ;; esac
+	# A configured mirror must remain authoritative.
+	[ "$BASE_URL" = "https://github.com/$OWNER/$REPO/releases/download/$TAG" ] &&
+		[ "$API_BASE" = https://api.github.com ] &&
+		command -v jsonfilter >/dev/null 2>&1 || return 1
+	case "$1" in '' | *[!A-Za-z0-9._-]*) return 1 ;; esac
+
+	_fra_index="$WORK/github-assets.json"
+	_fra_api="$API_BASE/repos/$OWNER/$REPO/releases"
+	fetch_progress "загрузка: пробую официальный API GitHub для $1"
+	if [ ! -s "$_fra_index" ]; then
+		CSQTT_FETCH_ATTEMPTS=1 fetch "$_fra_api/tags/$TAG" "$_fra_index" || return 1
+	fi
+	_fra_expr="@.assets[@.name=\"$1\"]"
+	_fra_id=$(jsonfilter -i "$_fra_index" -e "$_fra_expr.id" 2>/dev/null)
+	case "$_fra_id" in '' | *[!0-9]*) FETCH_ERR=empty; return 1 ;; esac
+	_fra_digest=$(jsonfilter -i "$_fra_index" -e "$_fra_expr.digest" 2>/dev/null)
+	_fra_hash=${_fra_digest#sha256:}
+	case "$_fra_hash" in '' | *[!0-9a-f]*) FETCH_ERR=empty; return 1 ;; esac
+	[ "$_fra_hash" != "$_fra_digest" ] && [ "${#_fra_hash}" -eq 64 ] ||
+		{ FETCH_ERR=empty; return 1; }
+	CSQTT_FETCH_ATTEMPTS=1 fetch "$_fra_api/assets/$_fra_id?csqtt=$(date +%s)-$$" "$2" \
+		"Accept: application/octet-stream" || return 1
+	if [ "$(sha256sum "$2" | awk '{print $1}')" != "$_fra_hash" ]; then
+		rm -f "$2"
+		FETCH_ERR=empty
+		return 1
+	fi
+}
+
 fetch_manifest() {
 	[ -d "$WORK" ] || mkdir -p "$WORK"
-	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
+	if ! fetch_release_asset SHA256SUMS "$WORK/SHA256SUMS"; then
 		die "не удалось загрузить SHA256SUMS из $BASE_URL: $(fetch_fail_hint); изменения не вносились" "$EX_PREFLIGHT"
 	fi
 	[ -s "$WORK/SHA256SUMS" ] || die "SHA256SUMS пуст; выпуск неполный, изменения не вносились" "$EX_PREFLIGHT"
@@ -936,7 +978,7 @@ download_asset() { # download_asset "hash name" component
 	case "$_dl_name" in
 	*/* | "" | . | ..) die "недопустимое имя файла в SHA256SUMS: $_dl_name" "$EX_PREFLIGHT" ;;
 	esac
-	if ! fetch "$(asset_download_url "$_dl_name")" "$WORK/$_dl_name"; then
+	if ! fetch_release_asset "$_dl_name" "$WORK/$_dl_name"; then
 		_dl_hint=$(fetch_fail_hint)
 		if [ -n "$PIN_NAME" ]; then
 			emit "ARTIFACT_CHANGED|reason:unavailable|component:$INSTALL_SET|name:$_dl_name|fetch:${FETCH_ERR:-network}"
@@ -2330,7 +2372,7 @@ probe_core219() {
 	[ -n "$PKG_EXT" ] || { CORE219_REASON=no_pm; return 0; }
 	case "$ARCH" in '' | *[!A-Za-z0-9_.-]*) CORE219_REASON=no_arch; return 0 ;; esac
 	mkdir -p "$WORK" 2>/dev/null || { CORE219_REASON=no_tmpdir; return 0; }
-	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS" >/dev/null; then
+	if ! fetch_release_asset SHA256SUMS "$WORK/SHA256SUMS" >/dev/null; then
 		CORE219_FETCH_ERR=$FETCH_ERR
 		CORE219_FETCH_DETAIL=$FETCH_DETAIL
 		CORE219_REASON=fetch
@@ -2595,7 +2637,7 @@ cmd_check() {
 	fi
 
 	mkdir -p "$WORK"
-	if ! fetch "$(asset_download_url SHA256SUMS)" "$WORK/SHA256SUMS"; then
+	if ! fetch_release_asset SHA256SUMS "$WORK/SHA256SUMS"; then
 		err "не удалось загрузить SHA256SUMS из $BASE_URL: $(fetch_fail_hint)"
 		emit "CHECK_FAILED|stage:manifest|reason:${FETCH_ERR:-network}"
 		exit "$EX_PREFLIGHT"
