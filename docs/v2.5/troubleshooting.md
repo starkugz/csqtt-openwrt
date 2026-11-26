@@ -50,7 +50,22 @@ uci -q get csqtt.main.enabled
 Если `wget` возвращает код 0 без файла, проверьте размер исполняемого файла:
 `ls -lL "$(command -v wget)"`. Если на OpenWrt с APK установлен `wget-ssl`,
 переустановите его командой `apk fix wget-ssl`. Для CSQTT можно сразу
-запустить [установку с резервными загрузчиками](install.md#установка-с-github).
+запустить этот резервный вариант:
+
+```sh
+(
+  f=$(mktemp) || exit 1
+  trap 'rm -f "$f"' EXIT
+  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
+  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
+     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
+    ash "$f"
+  else
+    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
+    exit 1
+  fi
+)
+```
 
 При несовпадении SHA-256 вложенного скрипта (например, `installer.sh`)
 скачайте установщик заново по адресу из инструкции. Для пакета повторно

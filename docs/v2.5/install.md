@@ -30,19 +30,9 @@ CSQTT подключает роутер OpenWrt к серверу CSQTT. Вып�
 Выполните на роутере по SSH от root. Выберите ядро с панелью, только ядро или только панель.
 
 ```sh
-(
-  f=$(mktemp) || exit 1
-  trap 'rm -f "$f"' EXIT
-  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
-  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; wget -T 30 -O "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
-    ash "$f"
-  else
-    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
-    exit 1
-  fi
-)
+f=$(mktemp) &&
+wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
+[ -s "$f" ] && ash "$f"
 ```
 
 Для выбора версии панели без ядра см. [команды для панели](#только-панель-luci). Установщик определяет
@@ -178,19 +168,9 @@ csqtt log tail -n 50
 Откройте «Удаление компонентов» в основном меню либо запустите:
 
 ```sh
-(
-  f=$(mktemp) || exit 1
-  trap 'rm -f "$f"' EXIT
-  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
-  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; wget -T 30 -O "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
-    ash "$f" uninstall --menu
-  else
-    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
-    exit 1
-  fi
-)
+f=$(mktemp) &&
+wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
+[ -s "$f" ] && ash "$f" uninstall --menu
 ```
 
 Доступны отдельные действия:
@@ -219,19 +199,9 @@ csqtt log tail -n 50
 Для удаления только панели выполните команду по SSH:
 
 ```sh
-(
-  f=$(mktemp) || exit 1
-  trap 'rm -f "$f"' EXIT
-  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
-  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; wget -T 30 -O "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
-    ash "$f" uninstall --set panel
-  else
-    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
-    exit 1
-  fi
-)
+f=$(mktemp) &&
+wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
+[ -s "$f" ] && ash "$f" uninstall --set panel
 ```
 Служба CSQTT продолжит работу.
 Если после удаления LuCI ещё показывает пункт CSQTT, выполните
@@ -265,19 +235,9 @@ csqtt log tail -n 50
 Панель 2.5:
 
 ```sh
-(
-  f=$(mktemp) || exit 1
-  trap 'rm -f "$f"' EXIT
-  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
-  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; wget -T 30 -O "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
-    ash "$f" 2.5
-  else
-    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
-    exit 1
-  fi
-)
+f=$(mktemp) &&
+wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
+[ -s "$f" ] && ash "$f" 2.5
 ```
 
 Добавьте `--dry-run` после номера версии для просмотра плана.

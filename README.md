@@ -24,19 +24,9 @@
 **Текущий комплект: панель CSQTT 2.5 и ядра 2.1.9 / 2.5.3.**
 
 ```sh
-(
-  f=$(mktemp) || exit 1
-  trap 'rm -f "$f"' EXIT
-  url=https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh
-  if { curl -fsSL --connect-timeout 15 --max-time 60 -o "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; wget -T 30 -O "$f" "$url" && [ -s "$f" ]; } ||
-     { : >"$f"; uclient-fetch -T 30 -O "$f" "$url" && [ -s "$f" ]; }; then
-    ash "$f"
-  else
-    printf '%s\n' 'Не удалось скачать установщик CSQTT.' >&2
-    exit 1
-  fi
-)
+f=$(mktemp) &&
+wget -T 30 -O "$f" https://raw.githubusercontent.com/starkugz/csqtt-openwrt/refs/heads/main/install.sh &&
+[ -s "$f" ] && ash "$f"
 ```
 
 [Инструкция 2.5](docs/v2.5/README.md) · [Диагностика установки и импорта](docs/v2.5/troubleshooting.md#установка-и-импорт-профиля).
